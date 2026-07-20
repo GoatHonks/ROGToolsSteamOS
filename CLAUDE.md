@@ -72,6 +72,15 @@ working pad (so Decky reloads don't disturb it). Opt-in via `ctl_set_auto`.
 - Earlier blind approaches (single 3s shot; 15/30/45 timer; boot-only loop) were
   rejected: too-early toggles don't stick, and blind toggling spammed connect/
   disconnect notifications, dropped HueSync LEDs, and re-ran on Decky reload.
+- ⚠️⚠️ **A "surgical" unbind/rebind of just the gamepad interface (`1-2:1.5`) via
+  `/sys/bus/usb/drivers/usbhid/{unbind,bind}` — meant to spare the LED interface
+  and HueSync — caused a full BOOT LOOP on SteamOS** (yanking the gamepad HID out
+  during Steam Input's startup crashes the gamescope session, which restarts and
+  re-triggers it). Reverted. Recovery required deleting the plugin dir from a
+  live/recovery environment. Do NOT reintroduce interface unbind/rebind in the
+  boot/watchdog path. The whole-device `authorized` toggle (`_reconnect_device`)
+  is the only reconnect method known safe here — it resets LEDs too (HueSync must
+  be re-toggled), which is an accepted tradeoff.
 - ⚠️ Don't broaden the target beyond ASUS HID devices without care — toggling
   `authorized` on the wrong 0b05 device (MCU, etc.) could disrupt input.
 
