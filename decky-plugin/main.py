@@ -388,6 +388,9 @@ HID_CLASS = "03"  # bInterfaceClass for Human Interface Devices
 # dead, stopping the moment it works.
 CTL_INITIAL_WAIT = 10          # let SteamOS bring the pad up before the first check
 CTL_WATCHDOG_SECONDS = 15      # how often to check the gamepad is alive
+CTL_SETTLE_SECONDS = 8         # after a first "dead" reading, wait+recheck before acting
+                               # (a Desktop<->Game mode switch cycles the pad and it
+                               # self-recovers; don't fight SteamOS's own reconnect)
 CTL_POST_RECONNECT_GRACE = 8   # wait after a reconnect before re-checking
 CTL_MAX_FAILS = 5              # after this many failed reconnects in a row, back off
                                # until the pad recovers (avoids endless retry spam)
@@ -598,8 +601,15 @@ class Plugin:
             try:
                 if _controller_working():
                     self._ctl_fail_streak = 0
-                elif _ctl_load().get("auto_reconnect"):
-                    if self._ctl_fail_streak < CTL_MAX_FAILS:
+                elif _ctl_load().get("auto_reconnect") and self._ctl_fail_streak < CTL_MAX_FAILS:
+                    # First "dead" reading — confirm it's a real drop, not a transient
+                    # SteamOS controller cycle (Desktop<->Game mode switch drops the
+                    # pad and it re-appears on its own). Wait and re-check first.
+                    await asyncio.sleep(CTL_SETTLE_SECONDS)
+                    if _controller_working():
+                        self._ctl_fail_streak = 0
+                        decky.logger.info("Controller self-recovered (transient cycle); skipping")
+                    else:
                         decky.logger.info(
                             "Controller dead; auto-reconnect (streak %d)", self._ctl_fail_streak
                         )

@@ -663,6 +663,9 @@ function ControllerBody({ active }: { active: boolean }) {
 
   return (
     <>
+      <LightingControls active={active} />
+
+      <SubHeader>Controller Status</SubHeader>
       <Stat label="Gamepad input" value={inputState} />
       <Stat label="ASUS controllers" value={detected} />
       {s?.ok &&
@@ -688,8 +691,6 @@ function ControllerBody({ active }: { active: boolean }) {
           dead after a cold boot; leave the toggle on so drops fix themselves.
         </div>
       </PanelSectionRow>
-
-      <LightingControls active={active} />
     </>
   );
 }
