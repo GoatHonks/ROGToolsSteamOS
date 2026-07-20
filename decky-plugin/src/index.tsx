@@ -585,13 +585,21 @@ function FanBody({ active }: { active: boolean }) {
 const LED_MODE_LABELS: Record<string, string> = {
   solid: "Solid",
   breathing: "Breathing",
+  duality: "Duality (2 colors)",
   rainbow: "Rainbow",
   spiral: "Spiral",
+  battery: "Battery level",
+  temp: "Temperature",
 };
 const LED_SPEED_LABELS: Record<string, string> = { low: "Slow", medium: "Medium", high: "Fast" };
-// Modes that use the chosen color; rainbow and spiral are self-coloring (cycle),
-// so their color controls are hidden.
-const LED_COLOR_MODES = ["solid", "breathing"];
+// Which modes expose which controls.
+const LED_COLOR_MODES = ["solid", "breathing", "duality"]; // show the color picker
+const LED_SPEED_MODES = ["breathing", "duality", "rainbow", "spiral"]; // show speed
+const LED_DUAL_MODES = ["duality"]; // show the secondary color
+const LED_REACTIVE_HINTS: Record<string, string> = {
+  battery: "Rings track battery level: red (low) → yellow → green (full).",
+  temp: "Rings track CPU/GPU temperature: blue (cool) → green → red (hot).",
+};
 const LED_GAMMA_DEFAULTS = { gamma_r: 1.0, gamma_g: 2.0, gamma_b: 1.2 };
 
 const LED_PRESETS: [string, number, number, number][] = [
@@ -607,6 +615,7 @@ const LED_PRESETS: [string, number, number, number][] = [
 function LightingControls({ active }: { active: boolean }) {
   const [s, setS] = useState<any>(null);
   const [hexDraft, setHexDraft] = useState<string | null>(null);
+  const [hexDraft2, setHexDraft2] = useState<string | null>(null);
 
   useEffect(() => {
     if (active) ledGetStatus().then(setS);
@@ -674,7 +683,7 @@ function LightingControls({ active }: { active: boolean }) {
           </div>
         </PanelSectionRow>
       )}
-      {s.effects && mode !== "solid" && (
+      {s.effects && LED_SPEED_MODES.includes(mode) && (
         <PanelSectionRow>
           <div style={{ width: "100%", marginBottom: "10px" }}>
             <div style={{ fontSize: "0.8em", opacity: 0.7, marginBottom: "4px" }}>Speed</div>
@@ -684,6 +693,11 @@ function LightingControls({ active }: { active: boolean }) {
               onChange={(o) => patch({ speed: o.data, enabled: true })}
             />
           </div>
+        </PanelSectionRow>
+      )}
+      {LED_REACTIVE_HINTS[mode] && (
+        <PanelSectionRow>
+          <div style={{ fontSize: "0.78em", opacity: 0.7 }}>{LED_REACTIVE_HINTS[mode]}</div>
         </PanelSectionRow>
       )}
       <PanelSectionRow>
@@ -776,6 +790,68 @@ function LightingControls({ active }: { active: boolean }) {
               }}
             />
           </PanelSectionRow>
+
+          {LED_DUAL_MODES.includes(mode) && (
+            <>
+              <PanelSectionRow>
+                <div style={{ fontSize: "0.8em", opacity: 0.75, fontWeight: 600, marginTop: "4px" }}>
+                  Second color
+                </div>
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", width: "100%" }}>
+                  <div
+                    style={{
+                      width: "30px",
+                      height: "30px",
+                      flex: "0 0 auto",
+                      borderRadius: "6px",
+                      border: "1px solid rgba(255,255,255,0.3)",
+                      background: `rgb(${s.r2},${s.g2},${s.b2})`,
+                    }}
+                  />
+                  <div style={{ flex: 1 }}>
+                    <TextField
+                      label="Hex"
+                      value={hexDraft2 ?? rgbToHex(s.r2, s.g2, s.b2)}
+                      onChange={(e: any) => {
+                        const v = e.target.value;
+                        setHexDraft2(v);
+                        const rgb = hexToRgb(v);
+                        if (rgb) patch({ r2: rgb.r, g2: rgb.g, b2: rgb.b, enabled: true });
+                      }}
+                    />
+                  </div>
+                </div>
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <div style={{ width: "100%" }}>
+                  <div
+                    style={{
+                      height: "12px",
+                      borderRadius: "6px",
+                      background: HUE_GRADIENT,
+                      border: "1px solid rgba(255,255,255,0.2)",
+                      marginBottom: "-6px",
+                    }}
+                  />
+                  <SliderField
+                    label="Hue"
+                    value={Math.round(rgbToHsv(s.r2, s.g2, s.b2).h)}
+                    min={0}
+                    max={360}
+                    step={1}
+                    onChange={(v) => {
+                      const cur = rgbToHsv(s.r2, s.g2, s.b2);
+                      const { r, g, b } = hsvToRgb(v, cur.s || 100, 100);
+                      setHexDraft2(null);
+                      patch({ r2: r, g2: g, b2: b, enabled: true });
+                    }}
+                  />
+                </div>
+              </PanelSectionRow>
+            </>
+          )}
 
           <SubHeader>Color calibration</SubHeader>
           <PanelSectionRow>

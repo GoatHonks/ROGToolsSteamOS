@@ -106,7 +106,14 @@ tied to the same HID device as the LED node (found via `LED_NODE/device/hidraw/*
 `/dev/hidraw1`, rainbow + solid green work. Reports: `RGB_INIT`, config
 `5A D1 09 01 02`, brightness `5A BA C5 C4 <0-3>`, set-color
 `5A B3 zone mode r g b speed dir 00 r2 g2 b2`, `RGB_SET 5A B5`, `RGB_APPLY 5A B4`.
-Modes solid/breathing(01)/rainbow(02)/spiral(03); speed low E1/med EB/high F5.
+Modes solid(00)/breathing(01)/duality(01+2nd colour)/rainbow(02)/spiral(03); speed
+low EB/med F0/high F5 (shifted up from stock E1/EB/F5). Per-channel **gamma**
+(`gamma_r/g/b`, default 1.0/2.0/1.2) corrects the rings' mid-level green/blue
+over-brightness — user-tunable live via calibration sliders. **Reactive** modes
+(`battery`, `temp`) are software-driven: `_led_effect_loop` (task, every
+`LED_EFFECT_SECONDS`) recomputes a colour from capacity / max(CPU,GPU) temp and
+renders it as solid HID. `_led_apply` routes reactive→`_reactive_color`, else HID,
+else sysfs.
 `_led_apply` = HID if a hidraw exists, else `_led_apply_sysfs` (solid only, off-balance).
 ⚠️ HID LED *writes* are safe (unlike the reverted interface unbind/rebind).
 

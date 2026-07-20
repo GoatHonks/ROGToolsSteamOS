@@ -517,8 +517,12 @@ def _led_state_path():
     return os.path.join(_settings_dir(), "led_state.json")
 
 
-LED_MODES = ("solid", "breathing", "rainbow", "spiral")
+# Hardware modes (firmware) + software/reactive modes (our effect loop drives them).
+LED_HW_MODES = ("solid", "breathing", "duality", "rainbow", "spiral")
+LED_REACTIVE_MODES = ("battery", "temp")
+LED_MODES = LED_HW_MODES + LED_REACTIVE_MODES
 LED_SPEEDS = ("low", "medium", "high")
+LED_EFFECT_SECONDS = 4  # how often reactive modes refresh from the sensors
 
 
 def _led_load():
@@ -532,6 +536,10 @@ def _led_load():
         "r": _clamp8(st.get("r", 255)),
         "g": _clamp8(st.get("g", 0)),
         "b": _clamp8(st.get("b", 0)),
+        # secondary colour (Duality) — the second colour the rings breathe between.
+        "r2": _clamp8(st.get("r2", 0)),
+        "g2": _clamp8(st.get("g2", 0)),
+        "b2": _clamp8(st.get("b2", 255)),
         "brightness": _clamp8(st.get("brightness", 128)),
         "gamma_r": _clampf(st.get("gamma_r", LED_GAMMA_DEFAULT["r"]), LED_GAMMA_MIN, LED_GAMMA_MAX),
         "gamma_g": _clampf(st.get("gamma_g", LED_GAMMA_DEFAULT["g"]), LED_GAMMA_MIN, LED_GAMMA_MAX),
@@ -552,7 +560,8 @@ def _led_save(st):
 RGB_INIT = [0x5A, 0x41, 0x53, 0x55, 0x53, 0x20, 0x54, 0x65, 0x63, 0x68, 0x2E, 0x49, 0x6E, 0x63, 0x2E]
 RGB_SET = [0x5A, 0xB5]
 RGB_APPLY = [0x5A, 0xB4]
-LED_MODE_CODES = {"solid": 0x00, "breathing": 0x01, "rainbow": 0x02, "spiral": 0x03}
+# Duality shares the breathing/pulse slot (0x01) but carries a second colour.
+LED_MODE_CODES = {"solid": 0x00, "breathing": 0x01, "duality": 0x01, "rainbow": 0x02, "spiral": 0x03}
 # The stock speed bytes (E1/EB/F5) all felt too slow except the fastest, so shift
 # the usable range up. Higher byte = faster.
 LED_SPEED_CODES = {"low": 0xEB, "medium": 0xF0, "high": 0xF5}
@@ -577,12 +586,42 @@ def _gamma(v, exp):
     return round(255 * (_clamp8(v) / 255) ** exp)
 
 
-def _color_correct(st):
+def _color_correct(r, g, b, st):
     return (
-        _gamma(st["r"], st.get("gamma_r", LED_GAMMA_DEFAULT["r"])),
-        _gamma(st["g"], st.get("gamma_g", LED_GAMMA_DEFAULT["g"])),
-        _gamma(st["b"], st.get("gamma_b", LED_GAMMA_DEFAULT["b"])),
+        _gamma(r, st.get("gamma_r", LED_GAMMA_DEFAULT["r"])),
+        _gamma(g, st.get("gamma_g", LED_GAMMA_DEFAULT["g"])),
+        _gamma(b, st.get("gamma_b", LED_GAMMA_DEFAULT["b"])),
     )
+
+
+def _hsv2rgb(h, s, v):
+    """h in [0,360), s/v in [0,1] -> (r,g,b) 0-255."""
+    c = v * s
+    x = c * (1 - abs((h / 60) % 2 - 1))
+    m = v - c
+    r, g, b = {
+        0: (c, x, 0), 1: (x, c, 0), 2: (0, c, x),
+        3: (0, x, c), 4: (x, 0, c), 5: (c, 0, x),
+    }[int(h // 60) % 6]
+    return round((r + m) * 255), round((g + m) * 255), round((b + m) * 255)
+
+
+def _reactive_color(mode):
+    """Compute the colour for a sensor-driven mode: battery level or temperature."""
+    if mode == "battery":
+        pct = _read_opt(CAPACITY_FILE)
+        pct = 0 if pct is None else max(0, min(100, pct))
+        # red (empty) -> yellow (50%) -> green (full)
+        if pct < 50:
+            return 255, round(255 * pct / 50), 0
+        return round(255 * (100 - pct) / 50), 255, 0
+    if mode == "temp":
+        temps = [t for t in (_temp_c(CPU_HW), _temp_c(GPU_HW)) if t is not None]
+        t = max(temps) if temps else 0
+        lo, hi = 45, 85
+        f = max(0.0, min(1.0, (t - lo) / (hi - lo)))
+        return _hsv2rgb(240 * (1 - f), 1.0, 1.0)  # blue (cool) -> red (hot)
+    return 255, 255, 255
 
 
 def _led_hidraw():
@@ -634,9 +673,14 @@ def _led_apply_hid(st):
         mode = st.get("mode", "solid")
         code = LED_MODE_CODES.get(mode, 0x00)
         speed = 0x00 if mode == "solid" else LED_SPEED_CODES.get(st.get("speed", "medium"), 0xEB)
-        r, g, b = _color_correct(st)
+        r, g, b = _color_correct(st["r"], st["g"], st["b"], st)
+        # Duality breathes between the primary and a second colour (o_* bytes).
+        if mode == "duality":
+            r2, g2, b2 = _color_correct(st["r2"], st["g2"], st["b2"], st)
+        else:
+            r2 = g2 = b2 = 0x00
         # zone 0x00 = all rings; direction 0x01 = left (default for effects)
-        send([0x5A, 0xB3, 0x00, code, r, g, b, speed, 0x01, 0x00, 0x00, 0x00, 0x00])
+        send([0x5A, 0xB3, 0x00, code, r, g, b, speed, 0x01, 0x00, r2, g2, b2])
         send(RGB_SET)
         send(RGB_APPLY)
         return True
@@ -653,7 +697,7 @@ def _led_apply_sysfs(st):
         return False
     try:
         if st.get("enabled"):
-            cr, cg, cb = _color_correct(st)
+            cr, cg, cb = _color_correct(st["r"], st["g"], st["b"], st)
             packed = (cr << 16) | (cg << 8) | cb
             zones = _led_zone_count()
             _write(os.path.join(LED_NODE, "multi_intensity"), " ".join([str(packed)] * zones))
@@ -667,8 +711,12 @@ def _led_apply_sysfs(st):
 
 
 def _led_apply(st):
-    """Apply lighting: prefer the HID path (accurate colour + effects), fall back
-    to sysfs (solid colour only) if no hidraw is available."""
+    """Apply lighting: reactive modes compute a colour from sensors and render it
+    as solid; otherwise prefer the HID path (accurate colour + effects), falling
+    back to sysfs (solid colour only) if no hidraw is available."""
+    if st.get("mode") in LED_REACTIVE_MODES:
+        r, g, b = _reactive_color(st["mode"])
+        st = {**st, "mode": "solid", "r": r, "g": g, "b": b}
     if _led_apply_hid(st):
         return True
     return _led_apply_sysfs(st)
@@ -696,11 +744,12 @@ class Plugin:
         self._ctl_fail_streak = 0
         self._ctl_task = asyncio.create_task(self._ctl_watchdog())
         # Lighting: re-assert the saved RGB now (a boot / earlier reconnect may
-        # have reset the rings). Safe sysfs write, independent of the controller.
+        # have reset the rings). Safe write, independent of the controller.
         _led_apply(_led_load())
+        self._led_task = asyncio.create_task(self._led_effect_loop())
 
     async def _unload(self):
-        for attr in ("_bat_task", "_fan_task", "_ctl_task"):
+        for attr in ("_bat_task", "_fan_task", "_ctl_task", "_led_task"):
             task = getattr(self, attr, None)
             if task:
                 task.cancel()
@@ -715,6 +764,18 @@ class Plugin:
         while True:
             await asyncio.sleep(FAN_WATCHDOG_SECONDS)
             _fan_enforce_once()
+
+    async def _led_effect_loop(self):
+        """Drive the reactive (battery/temp) lighting modes: refresh the ring colour
+        from the sensors on a timer. Does nothing for solid/hardware-effect modes."""
+        while True:
+            await asyncio.sleep(LED_EFFECT_SECONDS)
+            try:
+                st = _led_load()
+                if st.get("enabled") and st.get("mode") in LED_REACTIVE_MODES:
+                    _led_apply(st)
+            except Exception:  # noqa: BLE001
+                decky.logger.exception("led effect loop error")
 
     async def _ctl_watchdog(self):
         """Keep the built-in gamepad alive: reconnect whenever it goes dead.
@@ -1057,7 +1118,7 @@ class Plugin:
         """Update lighting from a partial dict {r,g,b,brightness,enabled,mode,speed} and apply."""
         try:
             st = _led_load()
-            for k in ("r", "g", "b", "brightness"):
+            for k in ("r", "g", "b", "r2", "g2", "b2", "brightness"):
                 if patch.get(k) is not None:
                     st[k] = _clamp8(patch[k])
             if patch.get("enabled") is not None:
