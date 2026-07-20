@@ -522,7 +522,11 @@ LED_HW_MODES = ("solid", "breathing", "duality", "rainbow", "spiral")
 LED_REACTIVE_MODES = ("battery", "temp")
 LED_MODES = LED_HW_MODES + LED_REACTIVE_MODES
 LED_SPEEDS = ("low", "medium", "high")
-LED_EFFECT_SECONDS = 4  # how often reactive modes refresh from the sensors
+# Reactive modes ease toward the sensor target: a short tick + a fraction of the
+# remaining distance each tick makes the colour glide instead of stepping. Writes
+# only happen while it's actually moving (steady state is silent).
+LED_FADE_TICK = 0.8
+LED_FADE_ALPHA = 0.3
 
 
 def _led_load():
@@ -540,6 +544,11 @@ def _led_load():
         "r2": _clamp8(st.get("r2", 0)),
         "g2": _clamp8(st.get("g2", 0)),
         "b2": _clamp8(st.get("b2", 255)),
+        # per-side (Solid): when split, left ring uses r/g/b, right ring uses right_*.
+        "split": bool(st.get("split", False)),
+        "right_r": _clamp8(st.get("right_r", 0)),
+        "right_g": _clamp8(st.get("right_g", 0)),
+        "right_b": _clamp8(st.get("right_b", 255)),
         "brightness": _clamp8(st.get("brightness", 128)),
         "gamma_r": _clampf(st.get("gamma_r", LED_GAMMA_DEFAULT["r"]), LED_GAMMA_MIN, LED_GAMMA_MAX),
         "gamma_g": _clampf(st.get("gamma_g", LED_GAMMA_DEFAULT["g"]), LED_GAMMA_MIN, LED_GAMMA_MAX),
@@ -676,13 +685,24 @@ def _led_apply_hid(st):
         code = LED_MODE_CODES.get(mode, 0x00)
         speed = 0x00 if mode == "solid" else LED_SPEED_CODES.get(st.get("speed", "medium"), 0xEB)
         r, g, b = _color_correct(st["r"], st["g"], st["b"], st)
-        # Duality breathes between the primary and a second colour (o_* bytes).
-        if mode == "duality":
+
+        def set_zone(zone, cr, cg, cb, r2=0, g2=0, b2=0):
+            # direction 0x01 = left (default for effects)
+            send([0x5A, 0xB3, zone, code, cr, cg, cb, speed, 0x01, 0x00, r2, g2, b2])
+
+        if mode == "solid" and st.get("split"):
+            # Per-side: left ring = zones 1,2 (primary); right ring = zones 3,4.
+            rr, rg, rb = _color_correct(st["right_r"], st["right_g"], st["right_b"], st)
+            set_zone(0x01, r, g, b)
+            set_zone(0x02, r, g, b)
+            set_zone(0x03, rr, rg, rb)
+            set_zone(0x04, rr, rg, rb)
+        elif mode == "duality":
+            # Breathe between the primary and a second colour (o_* bytes).
             r2, g2, b2 = _color_correct(st["r2"], st["g2"], st["b2"], st)
+            set_zone(0x00, r, g, b, r2, g2, b2)
         else:
-            r2 = g2 = b2 = 0x00
-        # zone 0x00 = all rings; direction 0x01 = left (default for effects)
-        send([0x5A, 0xB3, 0x00, code, r, g, b, speed, 0x01, 0x00, r2, g2, b2])
+            set_zone(0x00, r, g, b)  # zone 0x00 = all rings
         send(RGB_SET)
         send(RGB_APPLY)
         return True
@@ -768,14 +788,27 @@ class Plugin:
             _fan_enforce_once()
 
     async def _led_effect_loop(self):
-        """Drive the reactive (battery/temp) lighting modes: refresh the ring colour
-        from the sensors on a timer. Does nothing for solid/hardware-effect modes."""
+        """Drive the reactive (battery/temp) lighting modes: ease the ring colour
+        toward the sensor target each tick. Idle for solid/hardware-effect modes."""
+        cur = None      # current eased colour (floats), None = snap on next target
+        last = None     # last colour actually written (ints), to skip no-op writes
         while True:
-            await asyncio.sleep(LED_EFFECT_SECONDS)
+            await asyncio.sleep(LED_FADE_TICK)
             try:
                 st = _led_load()
-                if st.get("enabled") and st.get("mode") in LED_REACTIVE_MODES:
-                    _led_apply(st)
+                if not (st.get("enabled") and st.get("mode") in LED_REACTIVE_MODES):
+                    cur = last = None
+                    continue
+                target = _reactive_color(st["mode"])
+                if cur is None:
+                    cur = [float(c) for c in target]
+                else:
+                    for i in range(3):
+                        cur[i] += (target[i] - cur[i]) * LED_FADE_ALPHA
+                shown = tuple(round(c) for c in cur)
+                if shown != last:
+                    _led_apply({**st, "mode": "solid", "r": shown[0], "g": shown[1], "b": shown[2]})
+                    last = shown
             except Exception:  # noqa: BLE001
                 decky.logger.exception("led effect loop error")
 
@@ -1120,9 +1153,11 @@ class Plugin:
         """Update lighting from a partial dict {r,g,b,brightness,enabled,mode,speed} and apply."""
         try:
             st = _led_load()
-            for k in ("r", "g", "b", "r2", "g2", "b2", "brightness"):
+            for k in ("r", "g", "b", "r2", "g2", "b2", "right_r", "right_g", "right_b", "brightness"):
                 if patch.get(k) is not None:
                     st[k] = _clamp8(patch[k])
+            if patch.get("split") is not None:
+                st["split"] = bool(patch["split"])
             if patch.get("enabled") is not None:
                 st["enabled"] = bool(patch["enabled"])
             if patch.get("mode") in LED_MODES:

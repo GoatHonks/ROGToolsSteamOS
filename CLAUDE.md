@@ -113,10 +113,13 @@ Modes solid(00)/breathing(01)/duality(01+2nd colour)/rainbow(02)/spiral(03); spe
 low EB/med F0/high F5 (shifted up from stock E1/EB/F5). Per-channel **gamma**
 (`gamma_r/g/b`, default 1.0/2.0/1.2) corrects the rings' mid-level green/blue
 over-brightness — user-tunable live via calibration sliders. **Reactive** modes
-(`battery`, `temp`) are software-driven: `_led_effect_loop` (task, every
-`LED_EFFECT_SECONDS`) recomputes a colour from capacity / max(CPU,GPU) temp and
-renders it as solid HID. `_led_apply` routes reactive→`_reactive_color`, else HID,
-else sysfs.
+(`battery`, `temp`) are software-driven: `_led_effect_loop` (task) EASES the ring
+colour toward the sensor target each `LED_FADE_TICK` (fraction `LED_FADE_ALPHA`),
+writing only while moving — smooth fade, silent at steady state. Colours from
+`_grad(BATTERY_STOPS/TEMP_STOPS, f)`. `_led_apply` routes reactive→`_reactive_color`,
+else HID, else sysfs. **Per-side** (Solid only): `split` sends the primary colour to
+zones 1,2 (left ring) and `right_*` to zones 3,4 (right ring) via per-zone HID
+set-colour commands; otherwise zone 0x00 (all).
 `_led_apply` = HID if a hidraw exists, else `_led_apply_sysfs` (solid only, off-balance).
 ⚠️ HID LED *writes* are safe (unlike the reverted interface unbind/rebind).
 

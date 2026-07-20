@@ -800,18 +800,44 @@ function LightingControls({ active }: { active: boolean }) {
       </PanelSectionRow>
       {usesColor && (
         <>
-          <ColorPicker r={s.r} g={s.g} b={s.b} onColor={setColor} />
-          <PanelSectionRow>
-            <Dropdown
-              rgOptions={presetItems}
-              selectedOption={undefined as any}
-              strDefaultLabel="Preset colors…"
-              onChange={(o) => {
-                const p = LED_PRESETS.find((x) => x[0] === o.data);
-                if (p) setColor(p[1], p[2], p[3]);
-              }}
-            />
-          </PanelSectionRow>
+          {mode === "solid" && (
+            <PanelSectionRow>
+              <ToggleField
+                label="Per-side colors"
+                description="Independent left / right ring colors"
+                checked={!!s.split}
+                onChange={(on) => patch({ split: on, enabled: true })}
+              />
+            </PanelSectionRow>
+          )}
+
+          {mode === "solid" && s.split ? (
+            <>
+              <ColorPicker label="Left ring" r={s.r} g={s.g} b={s.b} onColor={setColor} />
+              <ColorPicker
+                label="Right ring"
+                r={s.right_r}
+                g={s.right_g}
+                b={s.right_b}
+                onColor={(r, g, b) => patch({ right_r: r, right_g: g, right_b: b, enabled: true })}
+              />
+            </>
+          ) : (
+            <>
+              <ColorPicker r={s.r} g={s.g} b={s.b} onColor={setColor} />
+              <PanelSectionRow>
+                <Dropdown
+                  rgOptions={presetItems}
+                  selectedOption={undefined as any}
+                  strDefaultLabel="Preset colors…"
+                  onChange={(o) => {
+                    const p = LED_PRESETS.find((x) => x[0] === o.data);
+                    if (p) setColor(p[1], p[2], p[3]);
+                  }}
+                />
+              </PanelSectionRow>
+            </>
+          )}
 
           {LED_DUAL_MODES.includes(mode) && (
             <ColorPicker
