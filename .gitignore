@@ -1,0 +1,15 @@
+# Node / Decky
+node_modules/
+decky-plugin/dist/
+pnpm-lock.yaml.bak
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store
+
+# Decky packaged zip
+decky-plugin/*.zip

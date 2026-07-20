@@ -1,0 +1,79 @@
+# CLAUDE.md — ROGTools (SteamOS)
+
+Context for continuing this project in a new session. Read this first.
+
+## What this is
+
+An all-in-one Decky Loader plugin for the **ASUS ROG Ally X** on **SteamOS** that
+merges two earlier plugins and adds a controller fix, grouped into **collapsible
+categories** in the Quick Access panel:
+
+1. **Battery** — charge limit + bypass + health dashboard (from `ROGBatteryLimitBazz`)
+2. **Fan Control** — custom fan curves + named presets (from `ROGFanControlSteamOS`)
+3. **Controllers** — "Force reconnect" for the cold-boot gamepad dropout (new here)
+
+It supersedes the two source plugins; only one should be installed at a time or
+their watchdogs fight over the same sysfs nodes.
+
+- Local: `/Users/goathonks/Documents/ClaudeApps/ROGToolsSteamOS`
+- Source plugins: `../ROGBatteryLimitBazz`, `../ROGFanControlSteamOS` (their
+  CLAUDE.md files have the hard-won hardware facts; this repo copies their logic
+  verbatim, only renaming methods/state).
+- Dev on macOS, run/test on the Ally X. **No Node and no device here** → TS can't
+  be compiled or run locally; verify by reading. Build on-device via `./install.sh`.
+
+## Architecture
+
+```
+decky-plugin/
+  main.py        ONE root Plugin class (Decky loads only one). Split into three
+                 name-spaced feature groups so methods can't collide:
+                   bat_*  battery      fan_*  fan curves      ctl_*  controllers
+                 Each feature keeps its OWN state file in DECKY_PLUGIN_SETTINGS_DIR
+                 (battery_state.json / fan_state.json). Battery + fan each run a
+                 watchdog started in _main.
+  src/index.tsx  Quick Access UI. `CATEGORIES` registry drives collapsible
+                 `Category` sections; each has a self-contained Body component
+                 that only polls while expanded (`active` prop).
+  probe-controller.sh   Read-only: lists ASUS HID USB devices the reconnect targets.
+  install.sh / update.sh / uninstall.sh / package-zip.sh   nvm/pnpm build flow,
+                 same as the source plugins. Plugin dir name: rog-tools-steamos.
+```
+
+### Adding a new category later
+
+1. Add a `<prefix>_*` method group to the `Plugin` class in `main.py` (own state
+   file if it needs one; own watchdog task in `_main` if it must survive resume).
+2. Add a `<Prefix>Body({ active })` component + a `CATEGORIES` entry in `index.tsx`.
+   Nothing is wired by naming convention beyond the `callable("<method>")` strings.
+
+## Controllers feature (the new part)
+
+Cold boot sometimes leaves the built-in gamepad uninitialised; a warm reboot fixes
+it because it re-enumerates the USB device. `ctl_reconnect` reproduces that WITHOUT
+a reboot: find ASUS (vendor `0b05`) USB devices that have an HID interface
+(`bInterfaceClass == 03`) and toggle their USB `authorized` node `0 → 1`
+(1s pause). `_usb_dev_dirs` skips interface dirs (`3-2:1.0`) and root hubs (`usbN`).
+
+- **Not yet verified on-device.** The exact idProduct of the Ally X gamepad and
+  whether the `authorized` toggle alone brings it back needs testing. Have the user
+  run `probe-controller.sh` and the button, and report. If `authorized` isn't
+  enough, fallbacks to try: unbind/rebind at the `usb`/`usbhid` driver, or
+  `echo 0/1 > .../remove` + `usb...`. Keep it reversible.
+- ⚠️ Don't broaden the target beyond ASUS HID devices without care — toggling
+  `authorized` on the wrong 0b05 device (MCU, etc.) could disrupt input.
+
+## Hardware facts
+
+See the source plugins' CLAUDE.md — all verified battery (`BAT0`, limit resets on
+resume, 0 == 100) and fan (`asus_custom_fan_curve` hwmon, pwm 0–255, enable 1/2)
+facts carry over unchanged. ⚠️ **Never `grep -r` across `/sys/`** — it can
+kernel-panic the ASUS WMI nodes; the probe scripts glob specific paths only.
+
+## Conventions
+
+- Commit trailer: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
+- Git user: GoatHonks / ftagamer99@gmail.com. No GitHub Actions (Actions storage full).
+- Test Python logic against a fake sysfs dir before committing; TSX can't be
+  compiled here — rely on on-device testing.
+- Not yet a git repo / not yet pushed. No remote set up yet.
