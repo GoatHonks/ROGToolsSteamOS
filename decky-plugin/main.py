@@ -550,7 +550,23 @@ RGB_INIT = [0x5A, 0x41, 0x53, 0x55, 0x53, 0x20, 0x54, 0x65, 0x63, 0x68, 0x2E, 0x
 RGB_SET = [0x5A, 0xB5]
 RGB_APPLY = [0x5A, 0xB4]
 LED_MODE_CODES = {"solid": 0x00, "breathing": 0x01, "rainbow": 0x02, "spiral": 0x03}
-LED_SPEED_CODES = {"low": 0xE1, "medium": 0xEB, "high": 0xF5}
+# The stock speed bytes (E1/EB/F5) all felt too slow except the fastest, so shift
+# the usable range up. Higher byte = faster.
+LED_SPEED_CODES = {"low": 0xEB, "medium": 0xF0, "high": 0xF5}
+
+# The rings' green channel is disproportionately bright at mid levels (orange
+# 255,90,0 read as dark yellow; 255,35,0 looked right), so a straight RGB write is
+# off-balance. Per-channel gamma compresses the mids while preserving 0 and 255 —
+# so pure primaries and white stay put, but mixes look correct. Tune if needed.
+LED_GAMMA = {"r": 1.0, "g": 2.0, "b": 1.2}
+
+
+def _gamma(v, exp):
+    return round(255 * (_clamp8(v) / 255) ** exp)
+
+
+def _color_correct(r, g, b):
+    return _gamma(r, LED_GAMMA["r"]), _gamma(g, LED_GAMMA["g"]), _gamma(b, LED_GAMMA["b"])
 
 
 def _led_hidraw():
@@ -602,7 +618,7 @@ def _led_apply_hid(st):
         mode = st.get("mode", "solid")
         code = LED_MODE_CODES.get(mode, 0x00)
         speed = 0x00 if mode == "solid" else LED_SPEED_CODES.get(st.get("speed", "medium"), 0xEB)
-        r, g, b = _clamp8(st["r"]), _clamp8(st["g"]), _clamp8(st["b"])
+        r, g, b = _color_correct(st["r"], st["g"], st["b"])
         # zone 0x00 = all rings; direction 0x01 = left (default for effects)
         send([0x5A, 0xB3, 0x00, code, r, g, b, speed, 0x01, 0x00, 0x00, 0x00, 0x00])
         send(RGB_SET)
@@ -621,7 +637,8 @@ def _led_apply_sysfs(st):
         return False
     try:
         if st.get("enabled"):
-            packed = (_clamp8(st["r"]) << 16) | (_clamp8(st["g"]) << 8) | _clamp8(st["b"])
+            cr, cg, cb = _color_correct(st["r"], st["g"], st["b"])
+            packed = (cr << 16) | (cg << 8) | cb
             zones = _led_zone_count()
             _write(os.path.join(LED_NODE, "multi_intensity"), " ".join([str(packed)] * zones))
             _write(os.path.join(LED_NODE, "brightness"), _clamp8(st.get("brightness", 128)))
