@@ -594,16 +594,23 @@ def _color_correct(r, g, b, st):
     )
 
 
-def _hsv2rgb(h, s, v):
-    """h in [0,360), s/v in [0,1] -> (r,g,b) 0-255."""
-    c = v * s
-    x = c * (1 - abs((h / 60) % 2 - 1))
-    m = v - c
-    r, g, b = {
-        0: (c, x, 0), 1: (x, c, 0), 2: (0, c, x),
-        3: (0, x, c), 4: (x, 0, c), 5: (c, 0, x),
-    }[int(h // 60) % 6]
-    return round((r + m) * 255), round((g + m) * 255), round((b + m) * 255)
+def _grad(stops, f):
+    """Interpolate an RGB color along a list of (position, (r,g,b)) stops."""
+    f = max(0.0, min(1.0, f))
+    for i in range(1, len(stops)):
+        p0, c0 = stops[i - 1]
+        p1, c1 = stops[i]
+        if f <= p1:
+            t = (f - p0) / (p1 - p0) if p1 > p0 else 0.0
+            return tuple(round(c0[j] + (c1[j] - c0[j]) * t) for j in range(3))
+    return stops[-1][1]
+
+
+# Battery: red (empty) -> yellow (~65%) -> green (full), so green reads only near a
+# full charge. Temperature: blue (cool) -> yellow -> red (hot), no green.
+BATTERY_STOPS = [(0.0, (255, 0, 0)), (0.65, (255, 255, 0)), (1.0, (0, 255, 0))]
+TEMP_STOPS = [(0.0, (0, 0, 255)), (0.5, (255, 255, 0)), (1.0, (255, 0, 0))]
+TEMP_LO, TEMP_HI = 45, 85
 
 
 def _reactive_color(mode):
@@ -611,19 +618,11 @@ def _reactive_color(mode):
     if mode == "battery":
         pct = _read_opt(CAPACITY_FILE)
         pct = 0 if pct is None else max(0, min(100, pct))
-        # red (empty) -> yellow (~mid) -> green (full). Yellow sits high (~65%) so
-        # green only reads near a full charge, not at 60%.
-        mid = 65
-        if pct < mid:
-            return 255, round(255 * pct / mid), 0
-        return round(255 * (100 - pct) / (100 - mid)), 255, 0
+        return _grad(BATTERY_STOPS, pct / 100)
     if mode == "temp":
         temps = [t for t in (_temp_c(CPU_HW), _temp_c(GPU_HW)) if t is not None]
         t = max(temps) if temps else 0
-        # green (cool) -> yellow -> red (hot); no blue, and a smooth hue ramp.
-        lo, hi = 50, 90
-        f = max(0.0, min(1.0, (t - lo) / (hi - lo)))
-        return _hsv2rgb(120 * (1 - f), 1.0, 1.0)
+        return _grad(TEMP_STOPS, (t - TEMP_LO) / (TEMP_HI - TEMP_LO))
     return 255, 255, 255
 
 
