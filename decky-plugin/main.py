@@ -386,12 +386,11 @@ HID_CLASS = "03"  # bInterfaceClass for Human Interface Devices
 # spams connect/disconnect, drops LED plugins like HueSync, and re-runs on every
 # Decky reload), we only act on a genuine boot and only when the pad is actually
 # dead, stopping the moment it works.
-CTL_BOOT_MAX_UPTIME = 180   # only auto-reconnect within this many seconds of boot
-CTL_INITIAL_WAIT = 10       # let SteamOS bring the pad up on its own first
-CTL_RECHECK_WAIT = 8        # after a reconnect, wait this long before re-checking
-CTL_MAX_FIXES = 8           # keep retrying across the boot window until it works
-                            # (an early reconnect doesn't "stick" before Steam
-                            # Input is ready, so one or two tries isn't enough)
+CTL_INITIAL_WAIT = 10          # let SteamOS bring the pad up before the first check
+CTL_WATCHDOG_SECONDS = 15      # how often to check the gamepad is alive
+CTL_POST_RECONNECT_GRACE = 8   # wait after a reconnect before re-checking
+CTL_MAX_FAILS = 5              # after this many failed reconnects in a row, back off
+                               # until the pad recovers (avoids endless retry spam)
 
 
 def _ctl_state_path():
@@ -404,14 +403,6 @@ def _ctl_load():
 
 def _ctl_save(state):
     _save_json(_ctl_state_path(), state)
-
-
-def _uptime_seconds():
-    try:
-        with open("/proc/uptime") as f:
-            return float(f.read().split()[0])
-    except (OSError, ValueError):
-        return None
 
 
 # The Ally X gamepad enumerates in XInput mode as a "Microsoft X-Box 360 pad".
@@ -491,9 +482,11 @@ class Plugin:
         # Fan: re-assert the custom curve if armed.
         _fan_enforce_once()
         self._fan_task = asyncio.create_task(self._fan_watchdog())
-        # Controllers: if enabled, auto-reconnect once at boot so a dead-on-cold-boot
-        # gamepad is fixed before the user needs the (controller-driven) menu.
-        self._ctl_task = asyncio.create_task(self._ctl_startup())
+        # Controllers: if enabled, watch the gamepad and reconnect whenever it's
+        # dead — at boot, mid-session, or after resume — so the cold-boot (and
+        # later) dropout self-heals without the (controller-driven) menu.
+        self._ctl_fail_streak = 0
+        self._ctl_task = asyncio.create_task(self._ctl_watchdog())
 
     async def _unload(self):
         for attr in ("_bat_task", "_fan_task", "_ctl_task"):
@@ -512,38 +505,42 @@ class Plugin:
             await asyncio.sleep(FAN_WATCHDOG_SECONDS)
             _fan_enforce_once()
 
-    async def _ctl_startup(self):
-        auto = _ctl_load().get("auto_reconnect")
-        up = _uptime_seconds()
-        decky.logger.info("ctl startup: auto_reconnect=%s uptime=%s", auto, up)
-        if not auto:
-            return
-        # Skip on a mid-session Decky reload: only a real boot has low uptime.
-        if up is not None and up > CTL_BOOT_MAX_UPTIME:
-            decky.logger.info("Skip auto-reconnect: uptime %.0fs (not a fresh boot)", up)
-            return
-        # Give SteamOS a chance to bring the pad up on its own before we touch it.
-        await asyncio.sleep(CTL_INITIAL_WAIT)
-        # Keep retrying across the boot window: only ever reconnect while the pad is
-        # actually dead, and stop the instant the X-Box 360 pad node appears — so a
-        # pad that comes up on its own is never toggled, but a stubborn cold-boot
-        # dropout gets as many tries as it takes (early reconnects don't stick).
-        for attempt in range(1, CTL_MAX_FIXES + 1):
-            if not _ctl_load().get("auto_reconnect"):
-                return
-            if _controller_working():
-                decky.logger.info("Controller working after %d attempt(s); done", attempt - 1)
-                return
-            decky.logger.info("Controller dead; auto-reconnect attempt %d", attempt)
+    async def _ctl_watchdog(self):
+        """Keep the built-in gamepad alive: reconnect whenever it goes dead.
+
+        Only ever acts while the pad is actually dead (no X-Box 360 pad node), so a
+        working controller is never toggled — a Decky reload or normal boot with a
+        live pad does nothing. After CTL_MAX_FAILS reconnects that don't take, it
+        backs off until the pad recovers on its own, to avoid endless retry spam.
+        """
+        await asyncio.sleep(CTL_INITIAL_WAIT)  # let SteamOS bring it up first
+        while True:
             try:
-                await self.ctl_reconnect()
+                if _controller_working():
+                    self._ctl_fail_streak = 0
+                elif _ctl_load().get("auto_reconnect"):
+                    if self._ctl_fail_streak < CTL_MAX_FAILS:
+                        decky.logger.info(
+                            "Controller dead; auto-reconnect (streak %d)", self._ctl_fail_streak
+                        )
+                        try:
+                            await self.ctl_reconnect()
+                        except Exception:  # noqa: BLE001
+                            decky.logger.exception("watchdog reconnect failed")
+                        await asyncio.sleep(CTL_POST_RECONNECT_GRACE)
+                        if _controller_working():
+                            self._ctl_fail_streak = 0
+                            decky.logger.info("Controller recovered")
+                        else:
+                            self._ctl_fail_streak += 1
+                            if self._ctl_fail_streak >= CTL_MAX_FAILS:
+                                decky.logger.warning(
+                                    "Controller still dead after %d tries; backing off "
+                                    "until it recovers", CTL_MAX_FAILS
+                                )
             except Exception:  # noqa: BLE001
-                decky.logger.exception("auto-reconnect attempt %d failed", attempt)
-            await asyncio.sleep(CTL_RECHECK_WAIT)
-        decky.logger.info(
-            "Auto-reconnect gave up after %d attempts; working=%s",
-            CTL_MAX_FIXES, _controller_working()
-        )
+                decky.logger.exception("ctl watchdog error")
+            await asyncio.sleep(CTL_WATCHDOG_SECONDS)
 
     # ---------------------------------------------------------------
     # Battery

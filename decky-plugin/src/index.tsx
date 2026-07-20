@@ -602,11 +602,21 @@ const CATEGORIES: {
   { key: "controllers", title: "Controllers", icon: <FaGamepad />, body: ControllerBody },
 ];
 
+// Remembered open/closed state, kept at module scope so it survives the panel
+// unmounting when the user closes and reopens Quick Access.
+let persistedOpen: Record<string, boolean> = {};
+
 function Content() {
-  // Start collapsed so the panel isn't cluttered; each arrow toggles its own
-  // category independently (open several at once if you want).
-  const [open, setOpen] = useState<Record<string, boolean>>({});
-  const toggle = (key: string) => setOpen((o) => ({ ...o, [key]: !o[key] }));
+  // Start from whatever was open last time; each arrow toggles its own category
+  // independently (open several at once if you want) and stays that way until
+  // you close it again.
+  const [open, setOpen] = useState<Record<string, boolean>>(persistedOpen);
+  const toggle = (key: string) =>
+    setOpen((o) => {
+      const next = { ...o, [key]: !o[key] };
+      persistedOpen = next;
+      return next;
+    });
 
   return (
     <>
