@@ -543,7 +543,10 @@ function ControllerBody({ active }: { active: boolean }) {
     const r = await ctlReconnect();
     setBusy(false);
     if (failToast("ROG Controllers", r)) {
-      toast("ROG Controllers", `Reconnected ${r.reconnected} device${r.reconnected === 1 ? "" : "s"}`);
+      toast(
+        "ROG Controllers",
+        r.method === "interface-rebind" ? "Reconnected (LEDs preserved)" : "Reconnected controller",
+      );
       refresh();
     }
   };

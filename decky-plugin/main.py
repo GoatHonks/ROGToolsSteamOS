@@ -391,6 +391,9 @@ CTL_WATCHDOG_SECONDS = 15      # how often to check the gamepad is alive
 CTL_POST_RECONNECT_GRACE = 8   # wait after a reconnect before re-checking
 CTL_MAX_FAILS = 5              # after this many failed reconnects in a row, back off
                                # until the pad recovers (avoids endless retry spam)
+CTL_REBIND_GRACE = 5           # wait after a surgical rebind before judging it
+CTL_SURGICAL_TRIES = 3         # try the HueSync-safe interface rebind this many
+                               # times before escalating to a full re-enumerate
 
 
 def _ctl_state_path():
@@ -459,7 +462,12 @@ def _controller_candidates():
 
 
 async def _reconnect_device(dev_path):
-    """Re-enumerate one USB device via the authorized toggle. Returns True on success."""
+    """Re-enumerate one USB device via the authorized toggle. Returns True on success.
+
+    This resets the WHOLE composite device — including the Aura/RGB LED interface —
+    so LED plugins (HueSync) lose their grip. Prefer `_rebind_gamepad_interface`,
+    which only touches the gamepad interface; fall back to this if that fails.
+    """
     node = os.path.join(dev_path, "authorized")
     if not os.path.exists(node):
         return False
@@ -468,6 +476,45 @@ async def _reconnect_device(dev_path):
     _write(node, 1)
     await asyncio.sleep(0.3)
     return True
+
+
+def _gamepad_interface(dev_path):
+    """Path of the USB interface hosting the gamepad HID (not the LEDs/keyboard).
+
+    On the Ally X the gamepad, LEDs and keyboard are separate interfaces of the
+    same 0b05:1b4c device. The gamepad interface is the one whose input device
+    name contains "gamepad" (e.g. "ASUS ROG Ally X Gamepad"); the LED interface
+    has no input node, the keyboard ones say "Asus Keyboard".
+    """
+    dev = os.path.basename(dev_path)
+    for ifp in sorted(glob.glob(f"{dev_path}/{dev}:*")):
+        for nf in glob.glob(f"{ifp}/*/input/input*/name"):
+            if "gamepad" in _read_str(nf).lower():
+                return ifp
+    return None
+
+
+async def _rebind_gamepad_interface(dev_path):
+    """Unbind/rebind ONLY the gamepad interface via its driver — spares the LEDs.
+
+    Returns True if a rebind was issued. Leaves the Aura/RGB interface (and any
+    LED plugin holding it) untouched, unlike the whole-device authorized toggle.
+    """
+    ifp = _gamepad_interface(dev_path)
+    if not ifp:
+        return False
+    iface = os.path.basename(ifp)  # e.g. "1-2:1.5"
+    drv = os.path.basename(os.path.realpath(os.path.join(ifp, "driver"))) or "usbhid"
+    drv_dir = f"/sys/bus/usb/drivers/{drv}"
+    try:
+        _write(os.path.join(drv_dir, "unbind"), iface)
+        await asyncio.sleep(1.0)
+        _write(os.path.join(drv_dir, "bind"), iface)
+        await asyncio.sleep(0.3)
+        return True
+    except OSError:
+        decky.logger.exception("rebind interface %s (driver %s) failed", iface, drv)
+        return False
 
 
 # =====================================================================
@@ -520,11 +567,15 @@ class Plugin:
                     self._ctl_fail_streak = 0
                 elif _ctl_load().get("auto_reconnect"):
                     if self._ctl_fail_streak < CTL_MAX_FAILS:
+                        # Try the HueSync-safe interface rebind first; only escalate
+                        # to a full (LED-resetting) re-enumerate if it keeps failing.
+                        surgical = self._ctl_fail_streak < CTL_SURGICAL_TRIES
                         decky.logger.info(
-                            "Controller dead; auto-reconnect (streak %d)", self._ctl_fail_streak
+                            "Controller dead; reconnect (streak %d, %s)",
+                            self._ctl_fail_streak, "surgical" if surgical else "full",
                         )
                         try:
-                            await self.ctl_reconnect()
+                            await self._ctl_do_reconnect(surgical=surgical)
                         except Exception:  # noqa: BLE001
                             decky.logger.exception("watchdog reconnect failed")
                         await asyncio.sleep(CTL_POST_RECONNECT_GRACE)
@@ -791,23 +842,44 @@ class Plugin:
             decky.logger.exception("ctl_set_auto failed")
             return {"ok": False, "error": str(e)}
 
-    async def ctl_reconnect(self):
-        """Force-re-enumerate the ASUS HID (gamepad) USB devices — cold-boot fix."""
-        try:
-            devs = _controller_candidates()
-            if not devs:
-                return {"ok": False, "error": "No ASUS HID (0b05) USB device found"}
-            done = 0
+    async def _ctl_do_reconnect(self, surgical):
+        """One reconnect pass. `surgical` rebinds only the gamepad interface
+        (spares the LEDs/HueSync); otherwise re-enumerate the whole device."""
+        devs = _controller_candidates()
+        if not devs:
+            return {"ok": False, "error": "No ASUS HID (0b05) USB device found"}
+        if surgical:
+            n = 0
             for d in devs:
-                try:
-                    if await _reconnect_device(d["path"]):
-                        done += 1
-                        decky.logger.info("Reconnected controller %s (%s)", d["dev"], d["id"])
-                except OSError:
-                    decky.logger.exception("reconnect %s failed", d["dev"])
-            if done == 0:
-                return {"ok": False, "error": "Found controller(s) but couldn't toggle authorized"}
-            return {"ok": True, "reconnected": done}
+                if await _rebind_gamepad_interface(d["path"]):
+                    n += 1
+                    decky.logger.info("Rebound gamepad interface on %s (%s)", d["dev"], d["id"])
+            if n:
+                return {"ok": True, "method": "interface-rebind", "count": n}
+            # No gamepad interface found — fall through to a full re-enumerate.
+        n = 0
+        for d in devs:
+            try:
+                if await _reconnect_device(d["path"]):
+                    n += 1
+                    decky.logger.info("Re-enumerated controller %s (%s)", d["dev"], d["id"])
+            except OSError:
+                decky.logger.exception("reconnect %s failed", d["dev"])
+        if n == 0:
+            return {"ok": False, "error": "Found controller(s) but couldn't reconnect"}
+        return {"ok": True, "method": "device-reenum", "count": n}
+
+    async def ctl_reconnect(self):
+        """Force-reconnect the gamepad. Tries the HueSync-safe interface rebind
+        first, and only re-enumerates the whole device if that didn't revive it."""
+        try:
+            r = await self._ctl_do_reconnect(surgical=True)
+            if r.get("ok") and r.get("method") == "interface-rebind":
+                await asyncio.sleep(CTL_REBIND_GRACE)
+                if not _controller_working():
+                    decky.logger.info("Surgical rebind didn't revive pad; full re-enumerate")
+                    r = await self._ctl_do_reconnect(surgical=False)
+            return r
         except Exception as e:  # noqa: BLE001
             decky.logger.exception("ctl_reconnect failed")
             return {"ok": False, "error": str(e)}
