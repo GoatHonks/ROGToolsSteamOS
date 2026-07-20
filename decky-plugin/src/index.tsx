@@ -88,14 +88,68 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-// A lightweight sub-heading inside a category (avoids nesting PanelSections).
-function SubHeader({ children }: { children: ReactNode }) {
+// A group heading inside a category. A top divider + spacing makes each
+// subcategory read as its own clean block rather than one long list.
+function SubHeader({ children, first }: { children: ReactNode; first?: boolean }) {
   return (
     <PanelSectionRow>
-      <div style={{ fontWeight: 700, opacity: 0.9, paddingTop: "4px" }}>{children}</div>
+      <div
+        style={{
+          width: "100%",
+          fontWeight: 700,
+          fontSize: "1.05em",
+          letterSpacing: "0.4px",
+          textTransform: "uppercase",
+          opacity: 0.95,
+          marginTop: first ? "2px" : "18px",
+          paddingTop: first ? "2px" : "14px",
+          borderTop: first ? "none" : "1px solid rgba(255,255,255,0.13)",
+        }}
+      >
+        {children}
+      </div>
     </PanelSectionRow>
   );
 }
+
+// ---- color math for the HSV spectrum picker + hex field ----
+function hsvToRgb(h: number, s: number, v: number) {
+  s /= 100;
+  v /= 100;
+  const c = v * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = v - c;
+  let r = 0, g = 0, b = 0;
+  if (h < 60) [r, g] = [c, x];
+  else if (h < 120) [r, g] = [x, c];
+  else if (h < 180) [g, b] = [c, x];
+  else if (h < 240) [g, b] = [x, c];
+  else if (h < 300) [r, b] = [x, c];
+  else [r, b] = [c, x];
+  return { r: Math.round((r + m) * 255), g: Math.round((g + m) * 255), b: Math.round((b + m) * 255) };
+}
+function rgbToHsv(r: number, g: number, b: number) {
+  r /= 255; g /= 255; b /= 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  let h = 0;
+  if (d) {
+    if (mx === r) h = ((g - b) / d) % 6;
+    else if (mx === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h = (h * 60 + 360) % 360;
+  }
+  return { h, s: mx ? (d / mx) * 100 : 0, v: mx * 100 };
+}
+const hex2 = (n: number) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0");
+const rgbToHex = (r: number, g: number, b: number) => `#${hex2(r)}${hex2(g)}${hex2(b)}`.toUpperCase();
+function hexToRgb(h: string) {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec((h || "").trim());
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+const HUE_GRADIENT =
+  "linear-gradient(to right,#f00 0%,#ff0 17%,#0f0 33%,#0ff 50%,#00f 67%,#f0f 83%,#f00 100%)";
 
 // Collapsible category: a clickable header with a chevron, revealing its body.
 function Category({
@@ -548,6 +602,7 @@ const LED_PRESETS: [string, number, number, number][] = [
 
 function LightingControls({ active }: { active: boolean }) {
   const [s, setS] = useState<any>(null);
+  const [hexDraft, setHexDraft] = useState<string | null>(null);
 
   useEffect(() => {
     if (active) ledGetStatus().then(setS);
@@ -557,7 +612,7 @@ function LightingControls({ active }: { active: boolean }) {
   if (!s.ok || !s.available) {
     return (
       <>
-        <SubHeader>Lighting</SubHeader>
+        <SubHeader first>Lighting</SubHeader>
         <PanelSectionRow>
           <div style={{ fontSize: "0.8em", opacity: 0.7 }}>No RGB LED found on this device.</div>
         </PanelSectionRow>
@@ -571,9 +626,17 @@ function LightingControls({ active }: { active: boolean }) {
     const r = await ledSet(p);
     if (r?.ok) setS((prev: any) => ({ ...prev, ...r }));
   };
+  // Color changes from a non-text source should drop any in-progress hex typing.
+  const setColor = (r: number, g: number, b: number) => {
+    setHexDraft(null);
+    patch({ r, g, b, enabled: true });
+  };
+
   const briPct = Math.round(((s.brightness ?? 128) * 100) / 255);
   const mode = s.mode ?? "solid";
   const usesColor = mode !== "rainbow"; // rainbow ignores the chosen color
+  const hsv = rgbToHsv(s.r, s.g, s.b);
+  const hexVal = hexDraft ?? rgbToHex(s.r, s.g, s.b);
   const modeItems = (s.modes ?? ["solid"]).map((m: string) => ({
     label: LED_MODE_LABELS[m] ?? m,
     data: m,
@@ -582,10 +645,11 @@ function LightingControls({ active }: { active: boolean }) {
     label: LED_SPEED_LABELS[sp] ?? sp,
     data: sp,
   }));
+  const presetItems = LED_PRESETS.map(([name]) => ({ label: name, data: name }));
 
   return (
     <>
-      <SubHeader>Lighting</SubHeader>
+      <SubHeader first>Lighting</SubHeader>
       <PanelSectionRow>
         <ToggleField
           label="RGB lighting"
@@ -596,20 +660,26 @@ function LightingControls({ active }: { active: boolean }) {
       </PanelSectionRow>
       {s.effects && (
         <PanelSectionRow>
-          <Dropdown
-            rgOptions={modeItems}
-            selectedOption={mode}
-            onChange={(o) => patch({ mode: o.data, enabled: true })}
-          />
+          <div style={{ width: "100%", marginBottom: "10px" }}>
+            <div style={{ fontSize: "0.8em", opacity: 0.7, marginBottom: "4px" }}>Effect</div>
+            <Dropdown
+              rgOptions={modeItems}
+              selectedOption={mode}
+              onChange={(o) => patch({ mode: o.data, enabled: true })}
+            />
+          </div>
         </PanelSectionRow>
       )}
       {s.effects && mode !== "solid" && (
         <PanelSectionRow>
-          <Dropdown
-            rgOptions={speedItems}
-            selectedOption={s.speed ?? "medium"}
-            onChange={(o) => patch({ speed: o.data, enabled: true })}
-          />
+          <div style={{ width: "100%", marginBottom: "10px" }}>
+            <div style={{ fontSize: "0.8em", opacity: 0.7, marginBottom: "4px" }}>Speed</div>
+            <Dropdown
+              rgOptions={speedItems}
+              selectedOption={s.speed ?? "medium"}
+              onChange={(o) => patch({ speed: o.data, enabled: true })}
+            />
+          </div>
         </PanelSectionRow>
       )}
       <PanelSectionRow>
@@ -625,42 +695,82 @@ function LightingControls({ active }: { active: boolean }) {
       </PanelSectionRow>
       {usesColor && (
         <>
+          {/* Swatch + hex field */}
           <PanelSectionRow>
-            <div style={{ display: "flex", alignItems: "center", width: "100%" }}>
-              <span style={{ opacity: 0.8 }}>Color</span>
-              <div style={{ flex: 1 }} />
+            <div style={{ display: "flex", alignItems: "center", gap: "10px", width: "100%" }}>
               <div
                 style={{
-                  width: "26px",
-                  height: "26px",
+                  width: "30px",
+                  height: "30px",
+                  flex: "0 0 auto",
                   borderRadius: "6px",
                   border: "1px solid rgba(255,255,255,0.3)",
                   background: `rgb(${s.r},${s.g},${s.b})`,
                 }}
               />
+              <div style={{ flex: 1 }}>
+                <TextField
+                  label="Hex"
+                  value={hexVal}
+                  onChange={(e: any) => {
+                    const v = e.target.value;
+                    setHexDraft(v);
+                    const rgb = hexToRgb(v);
+                    if (rgb) patch({ ...rgb, enabled: true });
+                  }}
+                />
+              </div>
             </div>
           </PanelSectionRow>
-          {(["r", "g", "b"] as const).map((k) => (
-            <PanelSectionRow key={k}>
-              <SliderField
-                label={{ r: "Red", g: "Green", b: "Blue" }[k]}
-                value={s[k]}
-                min={0}
-                max={255}
-                step={5}
-                showValue
-                onChange={(v) => patch({ [k]: v, enabled: true })}
-              />
-            </PanelSectionRow>
-          ))}
+          {/* Hue spectrum */}
           <PanelSectionRow>
-            <div style={btnRow}>
-              {LED_PRESETS.map(([name, r, g, b]) => (
-                <DialogButton key={name} style={btn} onClick={() => patch({ r, g, b, enabled: true })}>
-                  {name}
-                </DialogButton>
-              ))}
+            <div style={{ width: "100%" }}>
+              <div
+                style={{
+                  height: "12px",
+                  borderRadius: "6px",
+                  background: HUE_GRADIENT,
+                  border: "1px solid rgba(255,255,255,0.2)",
+                  marginBottom: "-6px",
+                }}
+              />
+              <SliderField
+                label="Hue"
+                value={Math.round(hsv.h)}
+                min={0}
+                max={360}
+                step={1}
+                onChange={(v) => {
+                  const { r, g, b } = hsvToRgb(v, hsv.s || 100, 100);
+                  setColor(r, g, b);
+                }}
+              />
             </div>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <SliderField
+              label="Saturation"
+              value={Math.round(hsv.s)}
+              min={0}
+              max={100}
+              step={1}
+              showValue
+              onChange={(v) => {
+                const { r, g, b } = hsvToRgb(hsv.h, v, 100);
+                setColor(r, g, b);
+              }}
+            />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <Dropdown
+              rgOptions={presetItems}
+              selectedOption={undefined as any}
+              strDefaultLabel="Preset colors…"
+              onChange={(o) => {
+                const p = LED_PRESETS.find((x) => x[0] === o.data);
+                if (p) setColor(p[1], p[2], p[3]);
+              }}
+            />
           </PanelSectionRow>
         </>
       )}
