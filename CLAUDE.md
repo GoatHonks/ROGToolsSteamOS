@@ -28,7 +28,8 @@ their watchdogs fight over the same sysfs nodes.
 decky-plugin/
   main.py        ONE root Plugin class (Decky loads only one). Split into three
                  name-spaced feature groups so methods can't collide:
-                   bat_*  battery      fan_*  fan curves      ctl_*  controllers
+                   bat_*  battery   fan_*  fan curves   ctl_*  controllers
+                   led_*  RGB joystick-ring lighting
                  Each feature keeps its OWN state file in DECKY_PLUGIN_SETTINGS_DIR
                  (battery_state.json / fan_state.json). Battery + fan each run a
                  watchdog started in _main.
@@ -83,6 +84,24 @@ working pad (so Decky reloads don't disturb it). Opt-in via `ctl_set_auto`.
   be re-toggled), which is an accepted tradeoff.
 - ⚠️ Don't broaden the target beyond ASUS HID devices without care — toggling
   `authorized` on the wrong 0b05 device (MCU, etc.) could disrupt input.
+
+## Lighting feature (led_*)
+
+RGB stick rings live at `/sys/class/leds/ally:rgb:joystick_rings` (a Linux
+multicolor LED). **Verified on-device:** `multi_index` = "rgb rgb rgb rgb" (4
+zones); `multi_intensity` takes **one packed 0xRRGGBB integer PER ZONE** (4 values,
+NOT 12) — writing "255 0 0 0" (255 == 0x0000FF) lit the LEFT ring blue. Separate
+`brightness` node 0–255; off = brightness 0. `_led_apply` writes the same packed
+color to all zones (per-zone is a future step; zone 0 = left). We drive sysfs
+directly (no HID grab), so `_led_apply(_led_load())` is called at startup AND after
+every controller reconnect (which resets the rings) — this is our own replacement
+for HueSync and why owning it matters. Implemented from the hardware facts, not
+HueSync's code (BSD-3, but protocol/sysfs paths are non-copyrightable facts).
+
+Phase 2 (not built): hardware effects (rainbow/spiral/pulse/dual-color, speed) via
+the ASUS HID `0x5A` protocol written to the LED interface's `/dev/hidrawN`
+(interface `1-2:1.2`). ⚠️ HID LED writes are safe (unlike the reverted interface
+unbind/rebind); keep them off the boot-critical path regardless.
 
 ## Hardware facts
 

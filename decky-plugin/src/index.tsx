@@ -43,6 +43,9 @@ const fanDeleteProfile = callable<[pid: string], any>("fan_delete_profile");
 const ctlGetStatus = callable<[], any>("ctl_get_status");
 const ctlReconnect = callable<[], any>("ctl_reconnect");
 const ctlSetAuto = callable<[on: boolean], any>("ctl_set_auto");
+// Lighting
+const ledGetStatus = callable<[], any>("led_get_status");
+const ledSet = callable<[patch: any], any>("led_set");
 
 const toast = (title: string, body: string) => toaster.toast({ title, body });
 const failToast = (title: string, r: any) => {
@@ -523,6 +526,108 @@ function FanBody({ active }: { active: boolean }) {
 // ============================================================
 // Controllers category
 // ============================================================
+// RGB joystick-ring lighting. We drive /sys/class/leds directly (no HID grab),
+// and the backend re-applies it after a controller reconnect.
+const LED_PRESETS: [string, number, number, number][] = [
+  ["Red", 255, 0, 0],
+  ["Green", 0, 255, 0],
+  ["Blue", 0, 0, 255],
+  ["White", 255, 255, 255],
+  ["Cyan", 0, 255, 255],
+  ["Magenta", 255, 0, 255],
+  ["Orange", 255, 90, 0],
+];
+
+function LightingControls({ active }: { active: boolean }) {
+  const [s, setS] = useState<any>(null);
+
+  useEffect(() => {
+    if (active) ledGetStatus().then(setS);
+  }, [active]);
+
+  if (!s) return null;
+  if (!s.ok || !s.available) {
+    return (
+      <>
+        <SubHeader>Lighting</SubHeader>
+        <PanelSectionRow>
+          <div style={{ fontSize: "0.8em", opacity: 0.7 }}>No RGB LED found on this device.</div>
+        </PanelSectionRow>
+      </>
+    );
+  }
+
+  // Optimistically update local state, then persist+apply via the backend.
+  const patch = async (p: any) => {
+    setS((prev: any) => ({ ...prev, ...p }));
+    const r = await ledSet(p);
+    if (r?.ok) setS((prev: any) => ({ ...prev, ...r }));
+  };
+  const briPct = Math.round(((s.brightness ?? 128) * 100) / 255);
+
+  return (
+    <>
+      <SubHeader>Lighting</SubHeader>
+      <PanelSectionRow>
+        <ToggleField
+          label="RGB lighting"
+          description="Joystick-ring color — kept applied even after a controller reconnect"
+          checked={!!s.enabled}
+          onChange={(on) => patch({ enabled: on })}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <SliderField
+          label="Brightness"
+          value={briPct}
+          min={0}
+          max={100}
+          step={5}
+          showValue
+          onChange={(v) => patch({ brightness: Math.round((v * 255) / 100), enabled: true })}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <div style={{ display: "flex", alignItems: "center", width: "100%" }}>
+          <span style={{ opacity: 0.8 }}>Color</span>
+          <div style={{ flex: 1 }} />
+          <div
+            style={{
+              width: "26px",
+              height: "26px",
+              borderRadius: "6px",
+              border: "1px solid rgba(255,255,255,0.3)",
+              background: `rgb(${s.r},${s.g},${s.b})`,
+            }}
+          />
+        </div>
+      </PanelSectionRow>
+      {(["r", "g", "b"] as const).map((k) => (
+        <PanelSectionRow key={k}>
+          <SliderField
+            label={{ r: "Red", g: "Green", b: "Blue" }[k]}
+            value={s[k]}
+            min={0}
+            max={255}
+            step={5}
+            showValue
+            onChange={(v) => patch({ [k]: v, enabled: true })}
+          />
+        </PanelSectionRow>
+      ))}
+      <PanelSectionRow>
+        <div style={btnRow}>
+          {LED_PRESETS.map(([name, r, g, b]) => (
+            <DialogButton key={name} style={btn} onClick={() => patch({ r, g, b, enabled: true })}>
+              {name}
+            </DialogButton>
+          ))}
+        </div>
+      </PanelSectionRow>
+    </>
+  );
+}
+
 function ControllerBody({ active }: { active: boolean }) {
   const [s, setS] = useState<any>(null);
   const [busy, setBusy] = useState(false);
@@ -571,8 +676,8 @@ function ControllerBody({ active }: { active: boolean }) {
       </PanelSectionRow>
       <PanelSectionRow>
         <ToggleField
-          label="Auto-reconnect on startup"
-          description="Runs the reconnect once at boot, so a dead-on-cold-boot gamepad fixes itself before you need the menu"
+          label="Auto-reconnect when dead"
+          description="Watchdog revives the gamepad whenever it drops — at boot, mid-session or after resume — so you never need this menu with a dead controller"
           checked={!!s?.auto_reconnect}
           onChange={onAutoChange}
         />
@@ -580,10 +685,11 @@ function ControllerBody({ active }: { active: boolean }) {
       <PanelSectionRow>
         <div style={{ fontSize: "0.75em", opacity: 0.6 }}>
           Re-enumerates the built-in gamepad without a reboot. Use the button if the controller is
-          dead after a cold boot; enable the toggle once you've confirmed it works, so you never have
-          to open this menu with a dead controller.
+          dead after a cold boot; leave the toggle on so drops fix themselves.
         </div>
       </PanelSectionRow>
+
+      <LightingControls active={active} />
     </>
   );
 }

@@ -471,6 +471,83 @@ async def _reconnect_device(dev_path):
 
 
 # =====================================================================
+# Lighting feature (led_*) — RGB joystick rings
+# =====================================================================
+# The Ally X exposes its stick-ring RGB as a Linux multicolor LED at
+# /sys/class/leds/ally:rgb:joystick_rings. `multi_index` is "rgb rgb rgb rgb"
+# (4 zones); `multi_intensity` takes ONE packed 0xRRGGBB integer PER ZONE — verified
+# on-device: writing "255 0 0 0" (255 == 0x0000FF) lit the LEFT ring blue. A
+# separate `brightness` node (0-255) scales it. We drive this sysfs node directly
+# (no HID grabbing), so the color survives and is re-applied after a controller
+# reconnect — the whole point of owning it instead of relying on an external plugin.
+LED_DEFAULT_ZONES = 4
+
+
+def _led_node():
+    """The /sys/class/leds dir for the RGB rings (has multi_intensity)."""
+    fallback = None
+    for d in sorted(glob.glob("/sys/class/leds/*/")):
+        d = d.rstrip("/")
+        if not os.path.exists(os.path.join(d, "multi_intensity")):
+            continue
+        if "rgb" in os.path.basename(d):
+            return d
+        fallback = fallback or d
+    return fallback
+
+
+LED_NODE = _led_node()
+
+
+def _led_zone_count():
+    if not LED_NODE:
+        return LED_DEFAULT_ZONES
+    n = len(_read_str(os.path.join(LED_NODE, "multi_index")).split())
+    return n if n > 0 else LED_DEFAULT_ZONES
+
+
+def _clamp8(v):
+    return max(0, min(255, int(v)))
+
+
+def _led_state_path():
+    return os.path.join(_settings_dir(), "led_state.json")
+
+
+def _led_load():
+    st = _load_json(_led_state_path(), {})
+    return {
+        "enabled": bool(st.get("enabled", False)),
+        "r": _clamp8(st.get("r", 255)),
+        "g": _clamp8(st.get("g", 0)),
+        "b": _clamp8(st.get("b", 0)),
+        "brightness": _clamp8(st.get("brightness", 128)),
+    }
+
+
+def _led_save(st):
+    _save_json(_led_state_path(), st)
+
+
+def _led_apply(st):
+    """Write the LED state to sysfs. Disabled => brightness 0 (color remembered)."""
+    if not LED_NODE:
+        return False
+    try:
+        if st.get("enabled"):
+            packed = (_clamp8(st["r"]) << 16) | (_clamp8(st["g"]) << 8) | _clamp8(st["b"])
+            zones = _led_zone_count()
+            _write(os.path.join(LED_NODE, "multi_intensity"), " ".join([str(packed)] * zones))
+            _write(os.path.join(LED_NODE, "brightness"), _clamp8(st.get("brightness", 128)))
+        else:
+            _write(os.path.join(LED_NODE, "brightness"), 0)
+        return True
+    except OSError:
+        decky.logger.exception("led apply failed")
+        return False
+
+
+# =====================================================================
 # Plugin
 # =====================================================================
 class Plugin:
@@ -487,6 +564,9 @@ class Plugin:
         # later) dropout self-heals without the (controller-driven) menu.
         self._ctl_fail_streak = 0
         self._ctl_task = asyncio.create_task(self._ctl_watchdog())
+        # Lighting: re-assert the saved RGB now (a boot / earlier reconnect may
+        # have reset the rings). Safe sysfs write, independent of the controller.
+        _led_apply(_led_load())
 
     async def _unload(self):
         for attr in ("_bat_task", "_fan_task", "_ctl_task"):
@@ -531,6 +611,9 @@ class Plugin:
                         if _controller_working():
                             self._ctl_fail_streak = 0
                             decky.logger.info("Controller recovered")
+                            # The reconnect re-enumerated the device and reset the
+                            # rings — restore the user's lighting immediately.
+                            _led_apply(_led_load())
                         else:
                             self._ctl_fail_streak += 1
                             if self._ctl_fail_streak >= CTL_MAX_FAILS:
@@ -807,7 +890,36 @@ class Plugin:
                     decky.logger.exception("reconnect %s failed", d["dev"])
             if done == 0:
                 return {"ok": False, "error": "Found controller(s) but couldn't toggle authorized"}
+            # Re-enumeration reset the rings — restore lighting right away.
+            _led_apply(_led_load())
             return {"ok": True, "reconnected": done}
         except Exception as e:  # noqa: BLE001
             decky.logger.exception("ctl_reconnect failed")
+            return {"ok": False, "error": str(e)}
+
+    # ---------------------------------------------------------------
+    # Lighting
+    # ---------------------------------------------------------------
+    async def led_get_status(self):
+        try:
+            return {"ok": True, "available": bool(LED_NODE), "zones": _led_zone_count(), **_led_load()}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.exception("led_get_status failed")
+            return {"ok": False, "error": str(e)}
+
+    async def led_set(self, patch):
+        """Update lighting from a partial dict {r,g,b,brightness,enabled} and apply."""
+        try:
+            st = _led_load()
+            for k in ("r", "g", "b", "brightness"):
+                if patch.get(k) is not None:
+                    st[k] = _clamp8(patch[k])
+            if patch.get("enabled") is not None:
+                st["enabled"] = bool(patch["enabled"])
+            _led_save(st)
+            if not _led_apply(st) and not LED_NODE:
+                return {"ok": False, "error": "No RGB LED node on this device"}
+            return {"ok": True, **st}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.exception("led_set failed")
             return {"ok": False, "error": str(e)}
