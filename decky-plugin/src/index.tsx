@@ -119,6 +119,7 @@ function Category({
             justifyContent: "space-between",
             width: "100%",
             padding: "8px 10px",
+            marginBottom: "8px",
             borderRadius: "6px",
             cursor: "pointer",
             fontWeight: 700,
@@ -133,7 +134,18 @@ function Category({
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
         >
-          <span style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <span
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "10px",
+              paddingRight: "12px",
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
             {icon}
             {title}
           </span>

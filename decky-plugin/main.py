@@ -387,9 +387,11 @@ HID_CLASS = "03"  # bInterfaceClass for Human Interface Devices
 # Decky reload), we only act on a genuine boot and only when the pad is actually
 # dead, stopping the moment it works.
 CTL_BOOT_MAX_UPTIME = 180   # only auto-reconnect within this many seconds of boot
-CTL_INITIAL_WAIT = 12       # let SteamOS bring the pad up on its own first
-CTL_RECHECK_WAIT = 6        # after a reconnect, wait this long before re-checking
-CTL_MAX_FIXES = 2           # at most this many reconnects if it stays dead
+CTL_INITIAL_WAIT = 10       # let SteamOS bring the pad up on its own first
+CTL_RECHECK_WAIT = 8        # after a reconnect, wait this long before re-checking
+CTL_MAX_FIXES = 8           # keep retrying across the boot window until it works
+                            # (an early reconnect doesn't "stick" before Steam
+                            # Input is ready, so one or two tries isn't enough)
 
 
 def _ctl_state_path():
@@ -511,29 +513,36 @@ class Plugin:
             _fan_enforce_once()
 
     async def _ctl_startup(self):
-        if not _ctl_load().get("auto_reconnect"):
+        auto = _ctl_load().get("auto_reconnect")
+        up = _uptime_seconds()
+        decky.logger.info("ctl startup: auto_reconnect=%s uptime=%s", auto, up)
+        if not auto:
             return
         # Skip on a mid-session Decky reload: only a real boot has low uptime.
-        up = _uptime_seconds()
         if up is not None and up > CTL_BOOT_MAX_UPTIME:
             decky.logger.info("Skip auto-reconnect: uptime %.0fs (not a fresh boot)", up)
             return
         # Give SteamOS a chance to bring the pad up on its own before we touch it.
         await asyncio.sleep(CTL_INITIAL_WAIT)
+        # Keep retrying across the boot window: only ever reconnect while the pad is
+        # actually dead, and stop the instant the X-Box 360 pad node appears — so a
+        # pad that comes up on its own is never toggled, but a stubborn cold-boot
+        # dropout gets as many tries as it takes (early reconnects don't stick).
         for attempt in range(1, CTL_MAX_FIXES + 1):
             if not _ctl_load().get("auto_reconnect"):
                 return
             if _controller_working():
-                decky.logger.info("Controller already working; no reconnect needed")
+                decky.logger.info("Controller working after %d attempt(s); done", attempt - 1)
                 return
-            decky.logger.info("Controller not detected; auto-reconnect attempt %d", attempt)
+            decky.logger.info("Controller dead; auto-reconnect attempt %d", attempt)
             try:
                 await self.ctl_reconnect()
             except Exception:  # noqa: BLE001
                 decky.logger.exception("auto-reconnect attempt %d failed", attempt)
             await asyncio.sleep(CTL_RECHECK_WAIT)
         decky.logger.info(
-            "Auto-reconnect finished; controller working=%s", _controller_working()
+            "Auto-reconnect gave up after %d attempts; working=%s",
+            CTL_MAX_FIXES, _controller_working()
         )
 
     # ---------------------------------------------------------------
