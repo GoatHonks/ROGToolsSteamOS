@@ -50,3 +50,36 @@ done
 
 echo "Devices marked HID=yes are what 'Force reconnect' will re-enumerate."
 echo "If your gamepad is one of these, the plugin button should fix the cold-boot dropout."
+echo
+
+# ---- Working-vs-broken detection signal ----------------------------------
+# The plugin decides "is the gamepad working" by whether a joystick (js*) input
+# node exists that traces back to an ASUS (0b05) USB device. Run this script
+# BOTH when the controller works AND when it's dead, and compare this section —
+# it should say WORKING in one and NOT WORKING in the other.
+echo "== Gamepad input detection (the signal the plugin uses) =="
+asus_js=0
+for js in /sys/class/input/js*; do
+  [ -e "$js" ] || continue
+  name="$(cat "$js/device/name" 2>/dev/null || echo '?')"
+  # Walk up to the owning USB device to read its vendor id.
+  p="$(readlink -f "$js")"; vendor="????"
+  for _ in $(seq 1 12); do
+    p="$(dirname "$p")"
+    [ -f "$p/idVendor" ] && { vendor="$(cat "$p/idVendor")"; break; }
+    [ "$p" = "/" ] && break
+  done
+  tag=""
+  [ "$vendor" = "$VENDOR" ] && { tag="  <-- ASUS"; asus_js=1; }
+  echo "  $(basename "$js")  vendor=${vendor}  name='${name}'${tag}"
+done
+[ -e /sys/class/input/js0 ] || echo "  (no joystick nodes at all)"
+echo
+if [ "$asus_js" = 1 ]; then
+  echo "RESULT: WORKING  (an ASUS joystick node exists — plugin will NOT reconnect)"
+else
+  echo "RESULT: NOT WORKING  (no ASUS joystick node — plugin WILL reconnect)"
+fi
+echo
+echo ">> Run this once now (controller working) and once when it's dead after a"
+echo "   cold boot, and tell me if RESULT correctly says WORKING vs NOT WORKING."

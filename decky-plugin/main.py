@@ -382,13 +382,14 @@ def _fan_enforce_once():
 ASUS_USB_VENDOR = "0b05"
 USB_DEVICES = "/sys/bus/usb/devices"
 HID_CLASS = "03"  # bInterfaceClass for Human Interface Devices
-# Seconds-after-plugin-load to attempt an auto-reconnect at boot. Several spaced
-# tries: the gamepad settles into the broken state a little way into boot (and
-# Steam Input grabs it), so a single early toggle misses it — a late re-enumerate
-# is what works (matches doing it manually a while after boot). sysfs looks
-# identical whether the pad works or not, so we can't detect success and just
-# re-toggle at each mark; a working pad only gets a brief (~1s) blip.
-CTL_STARTUP_ATTEMPTS = [15, 30, 45]
+# Auto-reconnect-at-boot tuning. Instead of blindly toggling on a timer (which
+# spams connect/disconnect, drops LED plugins like HueSync, and re-runs on every
+# Decky reload), we only act on a genuine boot and only when the pad is actually
+# dead, stopping the moment it works.
+CTL_BOOT_MAX_UPTIME = 180   # only auto-reconnect within this many seconds of boot
+CTL_INITIAL_WAIT = 12       # let SteamOS bring the pad up on its own first
+CTL_RECHECK_WAIT = 6        # after a reconnect, wait this long before re-checking
+CTL_MAX_FIXES = 2           # at most this many reconnects if it stays dead
 
 
 def _ctl_state_path():
@@ -401,6 +402,37 @@ def _ctl_load():
 
 def _ctl_save(state):
     _save_json(_ctl_state_path(), state)
+
+
+def _uptime_seconds():
+    try:
+        with open("/proc/uptime") as f:
+            return float(f.read().split()[0])
+    except (OSError, ValueError):
+        return None
+
+
+def _controller_working():
+    """True if a working built-in gamepad is present.
+
+    A functioning ROG Ally X gamepad exposes a joystick (``js*``) input node that
+    traces back through sysfs to an ASUS (``0b05``) USB device. In the cold-boot
+    broken state the USB device is still there and ``authorized`` — those fields
+    look identical — but no joystick node is created (Steam shows no controller
+    either). So the presence of an ASUS joystick node is our "it works" signal.
+    """
+    for js in glob.glob("/sys/class/input/js*"):
+        p = os.path.realpath(js)
+        for _ in range(12):  # walk up the device tree to the USB device
+            p = os.path.dirname(p)
+            if not p or p == "/":
+                break
+            vf = os.path.join(p, "idVendor")
+            if os.path.exists(vf):
+                if _read_str(vf).lower() == ASUS_USB_VENDOR:
+                    return True
+                break
+    return False
 
 
 def _usb_dev_dirs():
@@ -487,18 +519,28 @@ class Plugin:
     async def _ctl_startup(self):
         if not _ctl_load().get("auto_reconnect"):
             return
-        last = 0
-        for mark in CTL_STARTUP_ATTEMPTS:
-            await asyncio.sleep(max(0, mark - last))
-            last = mark
-            # Re-check the toggle each time in case the user turned it off meanwhile.
+        # Skip on a mid-session Decky reload: only a real boot has low uptime.
+        up = _uptime_seconds()
+        if up is not None and up > CTL_BOOT_MAX_UPTIME:
+            decky.logger.info("Skip auto-reconnect: uptime %.0fs (not a fresh boot)", up)
+            return
+        # Give SteamOS a chance to bring the pad up on its own before we touch it.
+        await asyncio.sleep(CTL_INITIAL_WAIT)
+        for attempt in range(1, CTL_MAX_FIXES + 1):
             if not _ctl_load().get("auto_reconnect"):
                 return
+            if _controller_working():
+                decky.logger.info("Controller already working; no reconnect needed")
+                return
+            decky.logger.info("Controller not detected; auto-reconnect attempt %d", attempt)
             try:
-                r = await self.ctl_reconnect()
-                decky.logger.info("Startup auto-reconnect @%ss: %s", mark, r)
+                await self.ctl_reconnect()
             except Exception:  # noqa: BLE001
-                decky.logger.exception("startup auto-reconnect @%ss failed", mark)
+                decky.logger.exception("auto-reconnect attempt %d failed", attempt)
+            await asyncio.sleep(CTL_RECHECK_WAIT)
+        decky.logger.info(
+            "Auto-reconnect finished; controller working=%s", _controller_working()
+        )
 
     # ---------------------------------------------------------------
     # Battery
@@ -731,6 +773,7 @@ class Plugin:
                 "ok": True,
                 "count": len(devs),
                 "devices": [{"dev": d["dev"], "product": d["product"], "id": d["id"]} for d in devs],
+                "working": _controller_working(),
                 "auto_reconnect": bool(_ctl_load().get("auto_reconnect", False)),
             }
         except Exception as e:  # noqa: BLE001

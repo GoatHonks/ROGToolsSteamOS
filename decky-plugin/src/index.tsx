@@ -533,9 +533,11 @@ function ControllerBody({ active }: { active: boolean }) {
 
   const detected =
     s == null ? "…" : !s.ok ? `Error: ${s.error}` : s.count === 0 ? "None detected" : `${s.count} detected`;
+  const inputState = s == null || !s.ok ? "…" : s.working ? "Working" : "Not detected";
 
   return (
     <>
+      <Stat label="Gamepad input" value={inputState} />
       <Stat label="ASUS controllers" value={detected} />
       {s?.ok &&
         (s.devices ?? []).map((d: any) => (
