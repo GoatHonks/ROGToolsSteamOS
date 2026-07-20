@@ -533,6 +533,9 @@ def _led_load():
         "g": _clamp8(st.get("g", 0)),
         "b": _clamp8(st.get("b", 0)),
         "brightness": _clamp8(st.get("brightness", 128)),
+        "gamma_r": _clampf(st.get("gamma_r", LED_GAMMA_DEFAULT["r"]), LED_GAMMA_MIN, LED_GAMMA_MAX),
+        "gamma_g": _clampf(st.get("gamma_g", LED_GAMMA_DEFAULT["g"]), LED_GAMMA_MIN, LED_GAMMA_MAX),
+        "gamma_b": _clampf(st.get("gamma_b", LED_GAMMA_DEFAULT["b"]), LED_GAMMA_MIN, LED_GAMMA_MAX),
     }
 
 
@@ -557,16 +560,29 @@ LED_SPEED_CODES = {"low": 0xEB, "medium": 0xF0, "high": 0xF5}
 # The rings' green channel is disproportionately bright at mid levels (orange
 # 255,90,0 read as dark yellow; 255,35,0 looked right), so a straight RGB write is
 # off-balance. Per-channel gamma compresses the mids while preserving 0 and 255 —
-# so pure primaries and white stay put, but mixes look correct. Tune if needed.
-LED_GAMMA = {"r": 1.0, "g": 2.0, "b": 1.2}
+# so pure primaries and white stay put, but mixes look correct. These are the
+# DEFAULTS; the user can retune them live (stored per-channel in led_state).
+LED_GAMMA_DEFAULT = {"r": 1.0, "g": 2.0, "b": 1.2}
+LED_GAMMA_MIN, LED_GAMMA_MAX = 0.3, 3.0
+
+
+def _clampf(v, lo, hi):
+    try:
+        return max(lo, min(hi, float(v)))
+    except (TypeError, ValueError):
+        return lo
 
 
 def _gamma(v, exp):
     return round(255 * (_clamp8(v) / 255) ** exp)
 
 
-def _color_correct(r, g, b):
-    return _gamma(r, LED_GAMMA["r"]), _gamma(g, LED_GAMMA["g"]), _gamma(b, LED_GAMMA["b"])
+def _color_correct(st):
+    return (
+        _gamma(st["r"], st.get("gamma_r", LED_GAMMA_DEFAULT["r"])),
+        _gamma(st["g"], st.get("gamma_g", LED_GAMMA_DEFAULT["g"])),
+        _gamma(st["b"], st.get("gamma_b", LED_GAMMA_DEFAULT["b"])),
+    )
 
 
 def _led_hidraw():
@@ -618,7 +634,7 @@ def _led_apply_hid(st):
         mode = st.get("mode", "solid")
         code = LED_MODE_CODES.get(mode, 0x00)
         speed = 0x00 if mode == "solid" else LED_SPEED_CODES.get(st.get("speed", "medium"), 0xEB)
-        r, g, b = _color_correct(st["r"], st["g"], st["b"])
+        r, g, b = _color_correct(st)
         # zone 0x00 = all rings; direction 0x01 = left (default for effects)
         send([0x5A, 0xB3, 0x00, code, r, g, b, speed, 0x01, 0x00, 0x00, 0x00, 0x00])
         send(RGB_SET)
@@ -637,7 +653,7 @@ def _led_apply_sysfs(st):
         return False
     try:
         if st.get("enabled"):
-            cr, cg, cb = _color_correct(st["r"], st["g"], st["b"])
+            cr, cg, cb = _color_correct(st)
             packed = (cr << 16) | (cg << 8) | cb
             zones = _led_zone_count()
             _write(os.path.join(LED_NODE, "multi_intensity"), " ".join([str(packed)] * zones))
@@ -1050,6 +1066,9 @@ class Plugin:
                 st["mode"] = patch["mode"]
             if patch.get("speed") in LED_SPEEDS:
                 st["speed"] = patch["speed"]
+            for k in ("gamma_r", "gamma_g", "gamma_b"):
+                if patch.get(k) is not None:
+                    st[k] = _clampf(patch[k], LED_GAMMA_MIN, LED_GAMMA_MAX)
             _led_save(st)
             if not _led_apply(st) and not LED_NODE:
                 return {"ok": False, "error": "No RGB LED node on this device"}

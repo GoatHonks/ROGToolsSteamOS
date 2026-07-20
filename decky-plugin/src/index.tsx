@@ -589,6 +589,10 @@ const LED_MODE_LABELS: Record<string, string> = {
   spiral: "Spiral",
 };
 const LED_SPEED_LABELS: Record<string, string> = { low: "Slow", medium: "Medium", high: "Fast" };
+// Modes that use the chosen color; rainbow and spiral are self-coloring (cycle),
+// so their color controls are hidden.
+const LED_COLOR_MODES = ["solid", "breathing"];
+const LED_GAMMA_DEFAULTS = { gamma_r: 1.0, gamma_g: 2.0, gamma_b: 1.2 };
 
 const LED_PRESETS: [string, number, number, number][] = [
   ["Red", 255, 0, 0],
@@ -634,7 +638,7 @@ function LightingControls({ active }: { active: boolean }) {
 
   const briPct = Math.round(((s.brightness ?? 128) * 100) / 255);
   const mode = s.mode ?? "solid";
-  const usesColor = mode !== "rainbow"; // rainbow ignores the chosen color
+  const usesColor = LED_COLOR_MODES.includes(mode); // rainbow/spiral self-color
   const hsv = rgbToHsv(s.r, s.g, s.b);
   const hexVal = hexDraft ?? rgbToHex(s.r, s.g, s.b);
   const modeItems = (s.modes ?? ["solid"]).map((m: string) => ({
@@ -771,6 +775,32 @@ function LightingControls({ active }: { active: boolean }) {
                 if (p) setColor(p[1], p[2], p[3]);
               }}
             />
+          </PanelSectionRow>
+
+          <SubHeader>Color calibration</SubHeader>
+          <PanelSectionRow>
+            <div style={{ fontSize: "0.75em", opacity: 0.6 }}>
+              The rings' green/blue diodes run bright at mid levels. Higher = tamer channel.
+              Tune until your mixes match the swatch.
+            </div>
+          </PanelSectionRow>
+          {(["gamma_g", "gamma_b"] as const).map((k) => (
+            <PanelSectionRow key={k}>
+              <SliderField
+                label={k === "gamma_g" ? "Green balance" : "Blue balance"}
+                value={s[k] ?? LED_GAMMA_DEFAULTS[k]}
+                min={0.3}
+                max={3}
+                step={0.05}
+                showValue
+                onChange={(v) => patch({ [k]: v })}
+              />
+            </PanelSectionRow>
+          ))}
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={() => patch({ ...LED_GAMMA_DEFAULTS })}>
+              Reset calibration
+            </ButtonItem>
           </PanelSectionRow>
         </>
       )}
