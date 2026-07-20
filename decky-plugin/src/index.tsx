@@ -526,8 +526,16 @@ function FanBody({ active }: { active: boolean }) {
 // ============================================================
 // Controllers category
 // ============================================================
-// RGB joystick-ring lighting. We drive /sys/class/leds directly (no HID grab),
-// and the backend re-applies it after a controller reconnect.
+// RGB joystick-ring lighting. Driven via the ASUS HID protocol (accurate color +
+// hardware effects), re-applied by the backend after a controller reconnect.
+const LED_MODE_LABELS: Record<string, string> = {
+  solid: "Solid",
+  breathing: "Breathing",
+  rainbow: "Rainbow",
+  spiral: "Spiral",
+};
+const LED_SPEED_LABELS: Record<string, string> = { low: "Slow", medium: "Medium", high: "Fast" };
+
 const LED_PRESETS: [string, number, number, number][] = [
   ["Red", 255, 0, 0],
   ["Green", 0, 255, 0],
@@ -564,6 +572,16 @@ function LightingControls({ active }: { active: boolean }) {
     if (r?.ok) setS((prev: any) => ({ ...prev, ...r }));
   };
   const briPct = Math.round(((s.brightness ?? 128) * 100) / 255);
+  const mode = s.mode ?? "solid";
+  const usesColor = mode !== "rainbow"; // rainbow ignores the chosen color
+  const modeItems = (s.modes ?? ["solid"]).map((m: string) => ({
+    label: LED_MODE_LABELS[m] ?? m,
+    data: m,
+  }));
+  const speedItems = (s.speeds ?? ["medium"]).map((sp: string) => ({
+    label: LED_SPEED_LABELS[sp] ?? sp,
+    data: sp,
+  }));
 
   return (
     <>
@@ -571,11 +589,29 @@ function LightingControls({ active }: { active: boolean }) {
       <PanelSectionRow>
         <ToggleField
           label="RGB lighting"
-          description="Joystick-ring color — kept applied even after a controller reconnect"
+          description="Joystick-ring lighting — kept applied even after a controller reconnect"
           checked={!!s.enabled}
           onChange={(on) => patch({ enabled: on })}
         />
       </PanelSectionRow>
+      {s.effects && (
+        <PanelSectionRow>
+          <Dropdown
+            rgOptions={modeItems}
+            selectedOption={mode}
+            onChange={(o) => patch({ mode: o.data, enabled: true })}
+          />
+        </PanelSectionRow>
+      )}
+      {s.effects && mode !== "solid" && (
+        <PanelSectionRow>
+          <Dropdown
+            rgOptions={speedItems}
+            selectedOption={s.speed ?? "medium"}
+            onChange={(o) => patch({ speed: o.data, enabled: true })}
+          />
+        </PanelSectionRow>
+      )}
       <PanelSectionRow>
         <SliderField
           label="Brightness"
@@ -587,43 +623,47 @@ function LightingControls({ active }: { active: boolean }) {
           onChange={(v) => patch({ brightness: Math.round((v * 255) / 100), enabled: true })}
         />
       </PanelSectionRow>
-      <PanelSectionRow>
-        <div style={{ display: "flex", alignItems: "center", width: "100%" }}>
-          <span style={{ opacity: 0.8 }}>Color</span>
-          <div style={{ flex: 1 }} />
-          <div
-            style={{
-              width: "26px",
-              height: "26px",
-              borderRadius: "6px",
-              border: "1px solid rgba(255,255,255,0.3)",
-              background: `rgb(${s.r},${s.g},${s.b})`,
-            }}
-          />
-        </div>
-      </PanelSectionRow>
-      {(["r", "g", "b"] as const).map((k) => (
-        <PanelSectionRow key={k}>
-          <SliderField
-            label={{ r: "Red", g: "Green", b: "Blue" }[k]}
-            value={s[k]}
-            min={0}
-            max={255}
-            step={5}
-            showValue
-            onChange={(v) => patch({ [k]: v, enabled: true })}
-          />
-        </PanelSectionRow>
-      ))}
-      <PanelSectionRow>
-        <div style={btnRow}>
-          {LED_PRESETS.map(([name, r, g, b]) => (
-            <DialogButton key={name} style={btn} onClick={() => patch({ r, g, b, enabled: true })}>
-              {name}
-            </DialogButton>
+      {usesColor && (
+        <>
+          <PanelSectionRow>
+            <div style={{ display: "flex", alignItems: "center", width: "100%" }}>
+              <span style={{ opacity: 0.8 }}>Color</span>
+              <div style={{ flex: 1 }} />
+              <div
+                style={{
+                  width: "26px",
+                  height: "26px",
+                  borderRadius: "6px",
+                  border: "1px solid rgba(255,255,255,0.3)",
+                  background: `rgb(${s.r},${s.g},${s.b})`,
+                }}
+              />
+            </div>
+          </PanelSectionRow>
+          {(["r", "g", "b"] as const).map((k) => (
+            <PanelSectionRow key={k}>
+              <SliderField
+                label={{ r: "Red", g: "Green", b: "Blue" }[k]}
+                value={s[k]}
+                min={0}
+                max={255}
+                step={5}
+                showValue
+                onChange={(v) => patch({ [k]: v, enabled: true })}
+              />
+            </PanelSectionRow>
           ))}
-        </div>
-      </PanelSectionRow>
+          <PanelSectionRow>
+            <div style={btnRow}>
+              {LED_PRESETS.map(([name, r, g, b]) => (
+                <DialogButton key={name} style={btn} onClick={() => patch({ r, g, b, enabled: true })}>
+                  {name}
+                </DialogButton>
+              ))}
+            </div>
+          </PanelSectionRow>
+        </>
+      )}
     </>
   );
 }

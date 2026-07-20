@@ -517,10 +517,18 @@ def _led_state_path():
     return os.path.join(_settings_dir(), "led_state.json")
 
 
+LED_MODES = ("solid", "breathing", "rainbow", "spiral")
+LED_SPEEDS = ("low", "medium", "high")
+
+
 def _led_load():
     st = _load_json(_led_state_path(), {})
+    mode = st.get("mode", "solid")
+    speed = st.get("speed", "medium")
     return {
         "enabled": bool(st.get("enabled", False)),
+        "mode": mode if mode in LED_MODES else "solid",
+        "speed": speed if speed in LED_SPEEDS else "medium",
         "r": _clamp8(st.get("r", 255)),
         "g": _clamp8(st.get("g", 0)),
         "b": _clamp8(st.get("b", 0)),
@@ -532,8 +540,83 @@ def _led_save(st):
     _save_json(_led_state_path(), st)
 
 
-def _led_apply(st):
-    """Write the LED state to sysfs. Disabled => brightness 0 (color remembered)."""
+# ---- HID path (accurate color + hardware effects) ----
+# 64-byte HID output reports (report id 0x5A) to the ally:rgb device's own hidraw
+# node. This is the ASUS-native protocol (what Armoury Crate uses), so colours are
+# correct — unlike the sysfs multi_intensity path, whose channel balance is off
+# (green too strong). We rediscover the hidraw on every apply because a controller
+# reconnect re-enumerates the device and renumbers /dev/hidrawN.
+RGB_INIT = [0x5A, 0x41, 0x53, 0x55, 0x53, 0x20, 0x54, 0x65, 0x63, 0x68, 0x2E, 0x49, 0x6E, 0x63, 0x2E]
+RGB_SET = [0x5A, 0xB5]
+RGB_APPLY = [0x5A, 0xB4]
+LED_MODE_CODES = {"solid": 0x00, "breathing": 0x01, "rainbow": 0x02, "spiral": 0x03}
+LED_SPEED_CODES = {"low": 0xE1, "medium": 0xEB, "high": 0xF5}
+
+
+def _led_hidraw():
+    """The /dev/hidrawN tied to the same HID device as the RGB LED node."""
+    node = LED_NODE or _led_node()
+    if not node:
+        return None
+    hid_dev = os.path.realpath(os.path.join(node, "device"))
+    for h in glob.glob(os.path.join(hid_dev, "hidraw", "hidraw*")):
+        return "/dev/" + os.path.basename(h)
+    for base in (hid_dev, os.path.dirname(hid_dev)):
+        for h in glob.glob(os.path.join(base, "**", "hidraw", "hidraw*"), recursive=True):
+            return "/dev/" + os.path.basename(h)
+    return None
+
+
+def _hid_buf(data):
+    b = bytearray(64)
+    b[: len(data)] = bytes(data)
+    return bytes(b)
+
+
+def _hid_level(pct):
+    return 0 if pct <= 0 else min(3, max(1, round(pct / 100 * 3)))
+
+
+def _led_apply_hid(st):
+    """Drive the rings via the ASUS HID protocol. Returns True if it ran."""
+    node = _led_hidraw()
+    if not node:
+        return False
+    try:
+        fd = os.open(node, os.O_WRONLY)
+    except OSError:
+        decky.logger.exception("open hidraw failed")
+        return False
+    try:
+        def send(data):
+            os.write(fd, _hid_buf(data))
+
+        send(RGB_INIT)
+        send([0x5A, 0xD1, 0x09, 0x01, 0x02])  # config: enable RGB while awake
+        pct = round(_clamp8(st.get("brightness", 128)) * 100 / 255)
+        if not st.get("enabled") or pct == 0:
+            send([0x5A, 0xBA, 0xC5, 0xC4, 0x00])  # brightness 0 = off
+            send(RGB_APPLY)
+            return True
+        send([0x5A, 0xBA, 0xC5, 0xC4, _hid_level(pct)])
+        mode = st.get("mode", "solid")
+        code = LED_MODE_CODES.get(mode, 0x00)
+        speed = 0x00 if mode == "solid" else LED_SPEED_CODES.get(st.get("speed", "medium"), 0xEB)
+        r, g, b = _clamp8(st["r"]), _clamp8(st["g"]), _clamp8(st["b"])
+        # zone 0x00 = all rings; direction 0x01 = left (default for effects)
+        send([0x5A, 0xB3, 0x00, code, r, g, b, speed, 0x01, 0x00, 0x00, 0x00, 0x00])
+        send(RGB_SET)
+        send(RGB_APPLY)
+        return True
+    except OSError:
+        decky.logger.exception("led hid apply failed")
+        return False
+    finally:
+        os.close(fd)
+
+
+def _led_apply_sysfs(st):
+    """Fallback: solid colour + brightness via sysfs (no effects; colour balance off)."""
     if not LED_NODE:
         return False
     try:
@@ -548,6 +631,18 @@ def _led_apply(st):
     except OSError:
         decky.logger.exception("led apply failed")
         return False
+
+
+def _led_apply(st):
+    """Apply lighting: prefer the HID path (accurate colour + effects), fall back
+    to sysfs (solid colour only) if no hidraw is available."""
+    if _led_apply_hid(st):
+        return True
+    return _led_apply_sysfs(st)
+
+
+def _led_has_effects():
+    return _led_hidraw() is not None
 
 
 # =====================================================================
@@ -912,13 +1007,21 @@ class Plugin:
     # ---------------------------------------------------------------
     async def led_get_status(self):
         try:
-            return {"ok": True, "available": bool(LED_NODE), "zones": _led_zone_count(), **_led_load()}
+            return {
+                "ok": True,
+                "available": bool(LED_NODE),
+                "effects": _led_has_effects(),
+                "modes": list(LED_MODES),
+                "speeds": list(LED_SPEEDS),
+                "zones": _led_zone_count(),
+                **_led_load(),
+            }
         except Exception as e:  # noqa: BLE001
             decky.logger.exception("led_get_status failed")
             return {"ok": False, "error": str(e)}
 
     async def led_set(self, patch):
-        """Update lighting from a partial dict {r,g,b,brightness,enabled} and apply."""
+        """Update lighting from a partial dict {r,g,b,brightness,enabled,mode,speed} and apply."""
         try:
             st = _led_load()
             for k in ("r", "g", "b", "brightness"):
@@ -926,6 +1029,10 @@ class Plugin:
                     st[k] = _clamp8(patch[k])
             if patch.get("enabled") is not None:
                 st["enabled"] = bool(patch["enabled"])
+            if patch.get("mode") in LED_MODES:
+                st["mode"] = patch["mode"]
+            if patch.get("speed") in LED_SPEEDS:
+                st["speed"] = patch["speed"]
             _led_save(st)
             if not _led_apply(st) and not LED_NODE:
                 return {"ok": False, "error": "No RGB LED node on this device"}

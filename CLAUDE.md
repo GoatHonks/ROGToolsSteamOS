@@ -98,10 +98,17 @@ every controller reconnect (which resets the rings) — this is our own replacem
 for HueSync and why owning it matters. Implemented from the hardware facts, not
 HueSync's code (BSD-3, but protocol/sysfs paths are non-copyrightable facts).
 
-Phase 2 (not built): hardware effects (rainbow/spiral/pulse/dual-color, speed) via
-the ASUS HID `0x5A` protocol written to the LED interface's `/dev/hidrawN`
-(interface `1-2:1.2`). ⚠️ HID LED writes are safe (unlike the reverted interface
-unbind/rebind); keep them off the boot-critical path regardless.
+**HID path (primary, `_led_apply_hid`):** the sysfs multi_intensity channel balance
+is wrong (green too strong — orange needs g≈35 not 90). So colour+effects go through
+the ASUS-native HID `0x5A` protocol: 64-byte OUTPUT reports to the `/dev/hidrawN`
+tied to the same HID device as the LED node (found via `LED_NODE/device/hidraw/*`,
+**rediscovered each apply** because a reconnect renumbers hidraw). Verified
+`/dev/hidraw1`, rainbow + solid green work. Reports: `RGB_INIT`, config
+`5A D1 09 01 02`, brightness `5A BA C5 C4 <0-3>`, set-color
+`5A B3 zone mode r g b speed dir 00 r2 g2 b2`, `RGB_SET 5A B5`, `RGB_APPLY 5A B4`.
+Modes solid/breathing(01)/rainbow(02)/spiral(03); speed low E1/med EB/high F5.
+`_led_apply` = HID if a hidraw exists, else `_led_apply_sysfs` (solid only, off-balance).
+⚠️ HID LED *writes* are safe (unlike the reverted interface unbind/rebind).
 
 ## Hardware facts
 
