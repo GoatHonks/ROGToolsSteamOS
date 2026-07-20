@@ -1,7 +1,7 @@
 {
   "name": "rog-tools-steamos",
-  "version": "0.1.0",
-  "description": "All-in-one ROG Ally X tools (battery, fan, controllers) for Decky Loader on SteamOS",
+  "version": "1.0.0",
+  "description": "All-in-one ROG Ally X tools (battery, fan, controllers, RGB lighting) for Decky Loader on SteamOS",
   "type": "module",
   "scripts": {
     "build": "rollup -c",
@@ -25,7 +25,10 @@
   },
   "pnpm": {
     "peerDependencyRules": {
-      "ignoreMissing": ["react", "react-dom"]
+      "ignoreMissing": [
+        "react",
+        "react-dom"
+      ]
     }
   }
 }

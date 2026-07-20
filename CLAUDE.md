@@ -10,9 +10,12 @@ categories** in the Quick Access panel:
 
 1. **Battery** — charge limit + bypass + health dashboard (from `ROGBatteryLimitBazz`)
 2. **Fan Control** — custom fan curves + named presets (from `ROGFanControlSteamOS`)
-3. **Controllers** — "Force reconnect" for the cold-boot gamepad dropout (new here)
+3. **Controllers** — force-reconnect + auto-reconnect watchdog for the gamepad dropout
+4. **Lighting** — joystick-ring RGB (modes, Duality, battery/temp reactive), our
+   own HueSync replacement (re-applied after a controller reconnect)
 
-It supersedes the two source plugins; only one should be installed at a time or
+It supersedes the two source plugins (and HueSync for LEDs); only one should be
+installed at a time or
 their watchdogs fight over the same sysfs nodes.
 
 - Local: `/Users/goathonks/Documents/ClaudeApps/ROGToolsSteamOS`
@@ -130,4 +133,4 @@ kernel-panic the ASUS WMI nodes; the probe scripts glob specific paths only.
 - Git user: GoatHonks / ftagamer99@gmail.com. No GitHub Actions (Actions storage full).
 - Test Python logic against a fake sysfs dir before committing; TSX can't be
   compiled here — rely on on-device testing.
-- Not yet a git repo / not yet pushed. No remote set up yet.
+- Repo: https://github.com/GoatHonks/ROGToolsSteamOS (public, branch `main`, push over SSH).

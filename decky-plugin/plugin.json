@@ -4,8 +4,8 @@
   "flags": ["root"],
   "api_version": 1,
   "publish": {
-    "tags": ["rog", "ally", "battery", "fan", "cooling", "controller"],
-    "description": "All-in-one ROG Ally X tools for SteamOS: battery charge limit, custom fan curves, and controller force-reconnect — grouped into collapsible categories in the Quick Access menu.",
+    "tags": ["rog", "ally", "battery", "fan", "cooling", "controller", "rgb", "led"],
+    "description": "All-in-one ROG Ally X tools for SteamOS: battery charge limit, custom fan curves, controller auto-reconnect, and RGB lighting (with battery/temperature reactive effects) — grouped into collapsible categories in the Quick Access menu.",
     "image": ""
   }
 }
