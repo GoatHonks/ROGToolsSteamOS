@@ -611,16 +611,19 @@ def _reactive_color(mode):
     if mode == "battery":
         pct = _read_opt(CAPACITY_FILE)
         pct = 0 if pct is None else max(0, min(100, pct))
-        # red (empty) -> yellow (50%) -> green (full)
-        if pct < 50:
-            return 255, round(255 * pct / 50), 0
-        return round(255 * (100 - pct) / 50), 255, 0
+        # red (empty) -> yellow (~mid) -> green (full). Yellow sits high (~65%) so
+        # green only reads near a full charge, not at 60%.
+        mid = 65
+        if pct < mid:
+            return 255, round(255 * pct / mid), 0
+        return round(255 * (100 - pct) / (100 - mid)), 255, 0
     if mode == "temp":
         temps = [t for t in (_temp_c(CPU_HW), _temp_c(GPU_HW)) if t is not None]
         t = max(temps) if temps else 0
-        lo, hi = 45, 85
+        # green (cool) -> yellow -> red (hot); no blue, and a smooth hue ramp.
+        lo, hi = 50, 90
         f = max(0.0, min(1.0, (t - lo) / (hi - lo)))
-        return _hsv2rgb(240 * (1 - f), 1.0, 1.0)  # blue (cool) -> red (hot)
+        return _hsv2rgb(120 * (1 - f), 1.0, 1.0)
     return 255, 255, 255
 
 

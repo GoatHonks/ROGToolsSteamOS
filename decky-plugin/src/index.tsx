@@ -612,10 +612,103 @@ const LED_PRESETS: [string, number, number, number][] = [
   ["Orange", 255, 90, 0],
 ];
 
+// Self-contained color editor: swatch + hex + hue + saturation. Used for both the
+// primary and (Duality) secondary color so each has its own saturation.
+function ColorPicker({
+  label,
+  r,
+  g,
+  b,
+  onColor,
+}: {
+  label?: string;
+  r: number;
+  g: number;
+  b: number;
+  onColor: (r: number, g: number, b: number) => void;
+}) {
+  const [hexDraft, setHexDraft] = useState<string | null>(null);
+  useEffect(() => setHexDraft(null), [r, g, b]); // resync when color changes externally
+  const hsv = rgbToHsv(r, g, b);
+  return (
+    <>
+      {label && (
+        <PanelSectionRow>
+          <div style={{ fontSize: "0.8em", opacity: 0.75, fontWeight: 600, marginTop: "4px" }}>
+            {label}
+          </div>
+        </PanelSectionRow>
+      )}
+      <PanelSectionRow>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", width: "100%" }}>
+          <div
+            style={{
+              width: "30px",
+              height: "30px",
+              flex: "0 0 auto",
+              borderRadius: "6px",
+              border: "1px solid rgba(255,255,255,0.3)",
+              background: `rgb(${r},${g},${b})`,
+            }}
+          />
+          <div style={{ flex: 1 }}>
+            <TextField
+              label="Hex"
+              value={hexDraft ?? rgbToHex(r, g, b)}
+              onChange={(e: any) => {
+                const v = e.target.value;
+                setHexDraft(v);
+                const rgb = hexToRgb(v);
+                if (rgb) onColor(rgb.r, rgb.g, rgb.b);
+              }}
+            />
+          </div>
+        </div>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <div style={{ width: "100%" }}>
+          <div
+            style={{
+              height: "12px",
+              borderRadius: "6px",
+              background: HUE_GRADIENT,
+              border: "1px solid rgba(255,255,255,0.2)",
+              marginBottom: "-6px",
+            }}
+          />
+          <SliderField
+            label="Hue"
+            value={Math.round(hsv.h)}
+            min={0}
+            max={360}
+            step={1}
+            onChange={(v) => {
+              const c = hsvToRgb(v, hsv.s || 100, 100);
+              onColor(c.r, c.g, c.b);
+            }}
+          />
+        </div>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <SliderField
+          label="Saturation"
+          value={Math.round(hsv.s)}
+          min={0}
+          max={100}
+          step={1}
+          showValue
+          onChange={(v) => {
+            const c = hsvToRgb(hsv.h, v, 100);
+            onColor(c.r, c.g, c.b);
+          }}
+        />
+      </PanelSectionRow>
+    </>
+  );
+}
+
 function LightingControls({ active }: { active: boolean }) {
   const [s, setS] = useState<any>(null);
-  const [hexDraft, setHexDraft] = useState<string | null>(null);
-  const [hexDraft2, setHexDraft2] = useState<string | null>(null);
 
   useEffect(() => {
     if (active) ledGetStatus().then(setS);
@@ -639,17 +732,11 @@ function LightingControls({ active }: { active: boolean }) {
     const r = await ledSet(p);
     if (r?.ok) setS((prev: any) => ({ ...prev, ...r }));
   };
-  // Color changes from a non-text source should drop any in-progress hex typing.
-  const setColor = (r: number, g: number, b: number) => {
-    setHexDraft(null);
-    patch({ r, g, b, enabled: true });
-  };
+  const setColor = (r: number, g: number, b: number) => patch({ r, g, b, enabled: true });
 
   const briPct = Math.round(((s.brightness ?? 128) * 100) / 255);
   const mode = s.mode ?? "solid";
   const usesColor = LED_COLOR_MODES.includes(mode); // rainbow/spiral self-color
-  const hsv = rgbToHsv(s.r, s.g, s.b);
-  const hexVal = hexDraft ?? rgbToHex(s.r, s.g, s.b);
   const modeItems = (s.modes ?? ["solid"]).map((m: string) => ({
     label: LED_MODE_LABELS[m] ?? m,
     data: m,
@@ -713,72 +800,7 @@ function LightingControls({ active }: { active: boolean }) {
       </PanelSectionRow>
       {usesColor && (
         <>
-          {/* Swatch + hex field */}
-          <PanelSectionRow>
-            <div style={{ display: "flex", alignItems: "center", gap: "10px", width: "100%" }}>
-              <div
-                style={{
-                  width: "30px",
-                  height: "30px",
-                  flex: "0 0 auto",
-                  borderRadius: "6px",
-                  border: "1px solid rgba(255,255,255,0.3)",
-                  background: `rgb(${s.r},${s.g},${s.b})`,
-                }}
-              />
-              <div style={{ flex: 1 }}>
-                <TextField
-                  label="Hex"
-                  value={hexVal}
-                  onChange={(e: any) => {
-                    const v = e.target.value;
-                    setHexDraft(v);
-                    const rgb = hexToRgb(v);
-                    if (rgb) patch({ ...rgb, enabled: true });
-                  }}
-                />
-              </div>
-            </div>
-          </PanelSectionRow>
-          {/* Hue spectrum */}
-          <PanelSectionRow>
-            <div style={{ width: "100%" }}>
-              <div
-                style={{
-                  height: "12px",
-                  borderRadius: "6px",
-                  background: HUE_GRADIENT,
-                  border: "1px solid rgba(255,255,255,0.2)",
-                  marginBottom: "-6px",
-                }}
-              />
-              <SliderField
-                label="Hue"
-                value={Math.round(hsv.h)}
-                min={0}
-                max={360}
-                step={1}
-                onChange={(v) => {
-                  const { r, g, b } = hsvToRgb(v, hsv.s || 100, 100);
-                  setColor(r, g, b);
-                }}
-              />
-            </div>
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <SliderField
-              label="Saturation"
-              value={Math.round(hsv.s)}
-              min={0}
-              max={100}
-              step={1}
-              showValue
-              onChange={(v) => {
-                const { r, g, b } = hsvToRgb(hsv.h, v, 100);
-                setColor(r, g, b);
-              }}
-            />
-          </PanelSectionRow>
+          <ColorPicker r={s.r} g={s.g} b={s.b} onColor={setColor} />
           <PanelSectionRow>
             <Dropdown
               rgOptions={presetItems}
@@ -792,65 +814,13 @@ function LightingControls({ active }: { active: boolean }) {
           </PanelSectionRow>
 
           {LED_DUAL_MODES.includes(mode) && (
-            <>
-              <PanelSectionRow>
-                <div style={{ fontSize: "0.8em", opacity: 0.75, fontWeight: 600, marginTop: "4px" }}>
-                  Second color
-                </div>
-              </PanelSectionRow>
-              <PanelSectionRow>
-                <div style={{ display: "flex", alignItems: "center", gap: "10px", width: "100%" }}>
-                  <div
-                    style={{
-                      width: "30px",
-                      height: "30px",
-                      flex: "0 0 auto",
-                      borderRadius: "6px",
-                      border: "1px solid rgba(255,255,255,0.3)",
-                      background: `rgb(${s.r2},${s.g2},${s.b2})`,
-                    }}
-                  />
-                  <div style={{ flex: 1 }}>
-                    <TextField
-                      label="Hex"
-                      value={hexDraft2 ?? rgbToHex(s.r2, s.g2, s.b2)}
-                      onChange={(e: any) => {
-                        const v = e.target.value;
-                        setHexDraft2(v);
-                        const rgb = hexToRgb(v);
-                        if (rgb) patch({ r2: rgb.r, g2: rgb.g, b2: rgb.b, enabled: true });
-                      }}
-                    />
-                  </div>
-                </div>
-              </PanelSectionRow>
-              <PanelSectionRow>
-                <div style={{ width: "100%" }}>
-                  <div
-                    style={{
-                      height: "12px",
-                      borderRadius: "6px",
-                      background: HUE_GRADIENT,
-                      border: "1px solid rgba(255,255,255,0.2)",
-                      marginBottom: "-6px",
-                    }}
-                  />
-                  <SliderField
-                    label="Hue"
-                    value={Math.round(rgbToHsv(s.r2, s.g2, s.b2).h)}
-                    min={0}
-                    max={360}
-                    step={1}
-                    onChange={(v) => {
-                      const cur = rgbToHsv(s.r2, s.g2, s.b2);
-                      const { r, g, b } = hsvToRgb(v, cur.s || 100, 100);
-                      setHexDraft2(null);
-                      patch({ r2: r, g2: g, b2: b, enabled: true });
-                    }}
-                  />
-                </div>
-              </PanelSectionRow>
-            </>
+            <ColorPicker
+              label="Second color"
+              r={s.r2}
+              g={s.g2}
+              b={s.b2}
+              onColor={(r, g, b) => patch({ r2: r, g2: g, b2: b, enabled: true })}
+            />
           )}
 
           <SubHeader>Color calibration</SubHeader>
