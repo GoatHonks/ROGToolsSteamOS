@@ -412,26 +412,20 @@ def _uptime_seconds():
         return None
 
 
-def _controller_working():
-    """True if a working built-in gamepad is present.
+# The Ally X gamepad enumerates in XInput mode as a "Microsoft X-Box 360 pad".
+# That input node is what actually carries gamepad input and what Steam lists as
+# a controller. The separate "ASUS ROG Ally X Gamepad" HID/N-KEY node is ALWAYS
+# present (config/hotkeys) even when the pad is dead, so it can't be the signal.
+# On a cold-boot dropout the X-Box 360 pad node is missing; when working it's there.
+GAMEPAD_NAME_HINTS = ("x-box 360", "xbox 360")
 
-    A functioning ROG Ally X gamepad exposes a joystick (``js*``) input node that
-    traces back through sysfs to an ASUS (``0b05``) USB device. In the cold-boot
-    broken state the USB device is still there and ``authorized`` — those fields
-    look identical — but no joystick node is created (Steam shows no controller
-    either). So the presence of an ASUS joystick node is our "it works" signal.
-    """
+
+def _controller_working():
+    """True if the functional gamepad (XInput "X-Box 360 pad") input node exists."""
     for js in glob.glob("/sys/class/input/js*"):
-        p = os.path.realpath(js)
-        for _ in range(12):  # walk up the device tree to the USB device
-            p = os.path.dirname(p)
-            if not p or p == "/":
-                break
-            vf = os.path.join(p, "idVendor")
-            if os.path.exists(vf):
-                if _read_str(vf).lower() == ASUS_USB_VENDOR:
-                    return True
-                break
+        name = _read_str(os.path.join(js, "device", "name")).lower()
+        if any(h in name for h in GAMEPAD_NAME_HINTS):
+            return True
     return False
 
 

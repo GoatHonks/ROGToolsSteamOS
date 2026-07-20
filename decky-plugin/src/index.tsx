@@ -108,6 +108,7 @@ function Category({
   onToggle: () => void;
   children: ReactNode;
 }) {
+  const [focused, setFocused] = useState(false);
   return (
     <PanelSection>
       <PanelSectionRow>
@@ -117,12 +118,20 @@ function Category({
             alignItems: "center",
             justifyContent: "space-between",
             width: "100%",
-            padding: "6px 4px",
+            padding: "8px 10px",
+            borderRadius: "6px",
             cursor: "pointer",
             fontWeight: 700,
+            // Visible highlight when this header has controller/mouse focus so you
+            // can tell which category you're about to open.
+            background: focused ? "rgba(255,255,255,0.16)" : "transparent",
+            outline: focused ? "2px solid rgba(120,180,255,0.9)" : "2px solid transparent",
+            transition: "background 0.1s ease",
           }}
           onActivate={onToggle}
           onClick={onToggle}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
         >
           <span style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             {icon}
