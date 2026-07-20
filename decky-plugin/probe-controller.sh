@@ -83,3 +83,36 @@ fi
 echo
 echo ">> Run this once now (controller working) and once when it's dead after a"
 echo "   cold boot, and tell me if RESULT correctly says WORKING vs NOT WORKING."
+echo
+
+# ---- Interface map (for a HueSync-friendly surgical reset) ---------------
+# The reconnect currently re-enumerates the WHOLE 0b05:1b4c device, which also
+# resets the Aura/RGB interface -> HueSync loses its grip. If the gamepad and the
+# LEDs live on DIFFERENT interfaces, we can unbind/rebind only the gamepad's
+# interface and leave the LEDs (and HueSync) alone. This maps them. Read-only;
+# globs specific paths only (never recursive across /sys). Run while WORKING.
+echo "== Interfaces of device 1-2 (gamepad vs LEDs) =="
+for ifp in /sys/bus/usb/devices/1-2:*; do
+  [ -d "$ifp" ] || continue
+  ifn="$(basename "$ifp")"
+  num="$(cat "$ifp/bInterfaceNumber" 2>/dev/null || echo '?')"
+  drv="$(basename "$(readlink "$ifp/driver" 2>/dev/null)" 2>/dev/null)"; drv="${drv:-none}"
+  tags=""; inputs=""
+  for nf in "$ifp"/*/input/input*/name; do
+    [ -f "$nf" ] || continue
+    n="$(cat "$nf" 2>/dev/null)"
+    inputs="${inputs}${inputs:+, }${n}"
+    case "$(printf '%s' "$n" | tr '[:upper:]' '[:lower:]')" in
+      *x-box\ 360*|*xbox\ 360*) tags="${tags} [GAMEPAD]" ;;
+    esac
+  done
+  for _ in "$ifp"/*/leds/*; do [ -e "$_" ] && { tags="${tags} [LEDs]"; break; }; done
+  hr=""
+  for h in "$ifp"/*/hidraw/hidraw*; do [ -e "$h" ] && hr="${hr}${hr:+ }$(basename "$h")"; done
+  echo "  ${ifn} (num ${num}) driver=${drv}${tags}"
+  [ -n "$inputs" ] && echo "      inputs: ${inputs}"
+  [ -n "$hr" ] && echo "      hidraw: ${hr}"
+done
+echo
+echo ">> Paste this section (run while the controller WORKS). I need to see which"
+echo "   interface has [GAMEPAD] vs [LEDs] to reset only the gamepad and spare HueSync."
