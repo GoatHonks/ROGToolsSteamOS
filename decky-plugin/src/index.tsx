@@ -52,13 +52,23 @@ const failToast = (title: string, r: any) => {
 
 // Compact button style so 2-3 buttons fit on one row without clipping the label.
 const btn = {
-  flex: 1,
-  minWidth: 0,
-  padding: "8px 4px",
+  flex: "1 1 30%",
+  minWidth: "72px",
+  padding: "8px 6px",
   fontSize: "0.8em",
   whiteSpace: "nowrap" as const,
   overflow: "hidden",
   textOverflow: "ellipsis",
+};
+
+// Row that holds a group of compact buttons: wraps instead of clipping, and keeps
+// clear vertical space from the control above it (e.g. the preset dropdown).
+const btnRow = {
+  display: "flex",
+  flexWrap: "wrap" as const,
+  gap: "8px",
+  width: "100%",
+  marginTop: "10px",
 };
 
 // ============================================================
@@ -221,7 +231,7 @@ function BatteryBody({ active }: { active: boolean }) {
         />
       </PanelSectionRow>
       <PanelSectionRow>
-        <div style={{ display: "flex", gap: "6px", width: "100%" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", width: "100%" }}>
           {BAT_PRESETS.map((p) => (
             <DialogButton
               key={p}
@@ -420,15 +430,15 @@ function FanBody({ active }: { active: boolean }) {
             <TextField label="Name" value={nameDraft} onChange={(e: any) => setNameDraft(e.target.value)} />
           </PanelSectionRow>
           <PanelSectionRow>
-            <div style={{ display: "flex", gap: "6px", width: "100%" }}>
-              <DialogButton style={{ flex: 1 }} onClick={saveRename}>Save</DialogButton>
-              <DialogButton style={{ flex: 1 }} onClick={() => setRenaming(false)}>Cancel</DialogButton>
+            <div style={btnRow}>
+              <DialogButton style={{ flex: 1, minWidth: "72px" }} onClick={saveRename}>Save</DialogButton>
+              <DialogButton style={{ flex: 1, minWidth: "72px" }} onClick={() => setRenaming(false)}>Cancel</DialogButton>
             </div>
           </PanelSectionRow>
         </>
       ) : (
         <PanelSectionRow>
-          <div style={{ display: "flex", gap: "4px", width: "100%" }}>
+          <div style={btnRow}>
             <DialogButton style={btn} onClick={startRename}>Rename</DialogButton>
             <DialogButton style={btn} onClick={onAddProfile}>New</DialogButton>
             <DialogButton style={btn} disabled={(s.profiles ?? []).length <= 1} onClick={onDeleteProfile}>
@@ -440,9 +450,13 @@ function FanBody({ active }: { active: boolean }) {
 
       <SubHeader>Fan</SubHeader>
       <PanelSectionRow>
-        <div style={{ display: "flex", gap: "4px", width: "100%" }}>
+        <div style={btnRow}>
           {([1, 2] as const).map((f) => (
-            <DialogButton key={f} onClick={() => setFan(f)} style={{ ...btn, fontWeight: fan === f ? 700 : 400 }}>
+            <DialogButton
+              key={f}
+              onClick={() => setFan(f)}
+              style={{ ...btn, flex: "1 1 45%", fontWeight: fan === f ? 700 : 400 }}
+            >
               {fanLabel(f)}
             </DialogButton>
           ))}

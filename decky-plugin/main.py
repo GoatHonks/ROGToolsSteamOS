@@ -382,7 +382,13 @@ def _fan_enforce_once():
 ASUS_USB_VENDOR = "0b05"
 USB_DEVICES = "/sys/bus/usb/devices"
 HID_CLASS = "03"  # bInterfaceClass for Human Interface Devices
-CTL_STARTUP_DELAY = 3  # seconds to let USB settle before an auto-reconnect at boot
+# Seconds-after-plugin-load to attempt an auto-reconnect at boot. Several spaced
+# tries: the gamepad settles into the broken state a little way into boot (and
+# Steam Input grabs it), so a single early toggle misses it — a late re-enumerate
+# is what works (matches doing it manually a while after boot). sysfs looks
+# identical whether the pad works or not, so we can't detect success and just
+# re-toggle at each mark; a working pad only gets a brief (~1s) blip.
+CTL_STARTUP_ATTEMPTS = [15, 30, 45]
 
 
 def _ctl_state_path():
@@ -481,12 +487,18 @@ class Plugin:
     async def _ctl_startup(self):
         if not _ctl_load().get("auto_reconnect"):
             return
-        await asyncio.sleep(CTL_STARTUP_DELAY)
-        try:
-            r = await self.ctl_reconnect()
-            decky.logger.info("Startup auto-reconnect: %s", r)
-        except Exception:  # noqa: BLE001
-            decky.logger.exception("startup auto-reconnect failed")
+        last = 0
+        for mark in CTL_STARTUP_ATTEMPTS:
+            await asyncio.sleep(max(0, mark - last))
+            last = mark
+            # Re-check the toggle each time in case the user turned it off meanwhile.
+            if not _ctl_load().get("auto_reconnect"):
+                return
+            try:
+                r = await self.ctl_reconnect()
+                decky.logger.info("Startup auto-reconnect @%ss: %s", mark, r)
+            except Exception:  # noqa: BLE001
+                decky.logger.exception("startup auto-reconnect @%ss failed", mark)
 
     # ---------------------------------------------------------------
     # Battery
