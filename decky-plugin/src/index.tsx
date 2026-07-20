@@ -42,6 +42,7 @@ const fanDeleteProfile = callable<[pid: string], any>("fan_delete_profile");
 // Controllers
 const ctlGetStatus = callable<[], any>("ctl_get_status");
 const ctlReconnect = callable<[], any>("ctl_reconnect");
+const ctlSetAuto = callable<[on: boolean], any>("ctl_set_auto");
 
 const toast = (title: string, body: string) => toaster.toast({ title, body });
 const failToast = (title: string, r: any) => {
@@ -512,6 +513,10 @@ function ControllerBody({ active }: { active: boolean }) {
     }
   };
 
+  const onAutoChange = async (on: boolean) => {
+    if (failToast("ROG Controllers", await ctlSetAuto(on))) refresh();
+  };
+
   const detected =
     s == null ? "…" : !s.ok ? `Error: ${s.error}` : s.count === 0 ? "None detected" : `${s.count} detected`;
 
@@ -528,9 +533,18 @@ function ControllerBody({ active }: { active: boolean }) {
         </ButtonItem>
       </PanelSectionRow>
       <PanelSectionRow>
+        <ToggleField
+          label="Auto-reconnect on startup"
+          description="Runs the reconnect once at boot, so a dead-on-cold-boot gamepad fixes itself before you need the menu"
+          checked={!!s?.auto_reconnect}
+          onChange={onAutoChange}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
         <div style={{ fontSize: "0.75em", opacity: 0.6 }}>
-          Re-enumerates the built-in gamepad without a reboot. Use this if the controller is dead
-          after a cold boot.
+          Re-enumerates the built-in gamepad without a reboot. Use the button if the controller is
+          dead after a cold boot; enable the toggle once you've confirmed it works, so you never have
+          to open this menu with a dead controller.
         </div>
       </PanelSectionRow>
     </>

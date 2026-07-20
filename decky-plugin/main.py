@@ -382,6 +382,19 @@ def _fan_enforce_once():
 ASUS_USB_VENDOR = "0b05"
 USB_DEVICES = "/sys/bus/usb/devices"
 HID_CLASS = "03"  # bInterfaceClass for Human Interface Devices
+CTL_STARTUP_DELAY = 3  # seconds to let USB settle before an auto-reconnect at boot
+
+
+def _ctl_state_path():
+    return os.path.join(_settings_dir(), "controller_state.json")
+
+
+def _ctl_load():
+    return _load_json(_ctl_state_path(), {})
+
+
+def _ctl_save(state):
+    _save_json(_ctl_state_path(), state)
 
 
 def _usb_dev_dirs():
@@ -444,9 +457,12 @@ class Plugin:
         # Fan: re-assert the custom curve if armed.
         _fan_enforce_once()
         self._fan_task = asyncio.create_task(self._fan_watchdog())
+        # Controllers: if enabled, auto-reconnect once at boot so a dead-on-cold-boot
+        # gamepad is fixed before the user needs the (controller-driven) menu.
+        self._ctl_task = asyncio.create_task(self._ctl_startup())
 
     async def _unload(self):
-        for attr in ("_bat_task", "_fan_task"):
+        for attr in ("_bat_task", "_fan_task", "_ctl_task"):
             task = getattr(self, attr, None)
             if task:
                 task.cancel()
@@ -461,6 +477,16 @@ class Plugin:
         while True:
             await asyncio.sleep(FAN_WATCHDOG_SECONDS)
             _fan_enforce_once()
+
+    async def _ctl_startup(self):
+        if not _ctl_load().get("auto_reconnect"):
+            return
+        await asyncio.sleep(CTL_STARTUP_DELAY)
+        try:
+            r = await self.ctl_reconnect()
+            decky.logger.info("Startup auto-reconnect: %s", r)
+        except Exception:  # noqa: BLE001
+            decky.logger.exception("startup auto-reconnect failed")
 
     # ---------------------------------------------------------------
     # Battery
@@ -693,9 +719,21 @@ class Plugin:
                 "ok": True,
                 "count": len(devs),
                 "devices": [{"dev": d["dev"], "product": d["product"], "id": d["id"]} for d in devs],
+                "auto_reconnect": bool(_ctl_load().get("auto_reconnect", False)),
             }
         except Exception as e:  # noqa: BLE001
             decky.logger.exception("ctl_get_status failed")
+            return {"ok": False, "error": str(e)}
+
+    async def ctl_set_auto(self, on: bool):
+        """Toggle auto-reconnect at plugin startup (i.e. at boot)."""
+        try:
+            state = _ctl_load()
+            state["auto_reconnect"] = bool(on)
+            _ctl_save(state)
+            return {"ok": True, "auto_reconnect": bool(on)}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.exception("ctl_set_auto failed")
             return {"ok": False, "error": str(e)}
 
     async def ctl_reconnect(self):
