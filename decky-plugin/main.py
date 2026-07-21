@@ -395,6 +395,11 @@ CTL_SETTLE_SECONDS = 8         # after a first "dead" reading, wait+recheck befo
 CTL_POST_RECONNECT_GRACE = 8   # wait after a reconnect before re-checking
 CTL_MAX_FAILS = 5              # after this many failed reconnects in a row, back off
                                # until the pad recovers (avoids endless retry spam)
+# Feature-disabled: on current SteamOS/Steam builds the re-enumeration binds a
+# transient "XInput Controller" and can wedge the device (dead power button), a
+# known unofficial-SteamOS kernel handshake issue we can't fix from here. Keep the
+# watchdog/detection code, but never auto-reconnect until this is set True again.
+CTL_AUTO_ENABLED = False
 
 
 def _ctl_state_path():
@@ -528,6 +533,8 @@ LED_SPEEDS = ("low", "medium", "high")
 # only happen while it's actually moving (steady state is silent).
 LED_FADE_TICK = 0.8
 LED_FADE_ALPHA = 0.3
+LED_ASSERT_EVERY = 6   # check for an unexpected LED reset every ~5s (6 * tick)
+LED_MAX_ASSERTS = 4    # stop re-cycling after this many relights that don't stick
 
 
 def _led_load():
@@ -749,6 +756,15 @@ def _led_has_effects():
     return _led_hidraw() is not None
 
 
+def _led_hw_off():
+    """True if the rings are physically off (brightness 0) — used to detect a reset
+    (suspend/resume, controller re-enumeration) so we can relight automatically."""
+    if not LED_NODE:
+        return False
+    v = _read_opt(os.path.join(LED_NODE, "brightness"))
+    return v is None or v == 0
+
+
 # =====================================================================
 # Plugin
 # =====================================================================
@@ -791,46 +807,58 @@ class Plugin:
     async def _led_effect_loop(self):
         """Drive the reactive (battery/temp) lighting modes: ease the ring colour
         toward the sensor target each tick. Idle for solid/hardware-effect modes."""
-        cur = None      # current eased colour (floats), None = snap on next target
-        last = None     # last colour actually written (ints), to skip no-op writes
+        cur = None       # current eased colour (floats), None = snap on next target
+        last = None      # last colour actually written (ints), to skip no-op writes
         last_wall = time.time()
+        tick = 0
+        assert_fails = 0  # consecutive relights that didn't stick (backoff guard)
         while True:
             await asyncio.sleep(LED_FADE_TICK)
+            tick += 1
             try:
-                # A big wall-clock jump means we were suspended; the rings reset over
-                # suspend, so re-apply on resume. A single apply isn't enough — the
-                # device needs an off->on cycle (same as toggling RGB manually).
                 now = time.time()
-                gap = now - last_wall
+                gap = now - last_wall  # a big jump == we were suspended
                 last_wall = now
                 st = _led_load()
-                if gap > 5:
-                    decky.logger.info("Resume detected (%.0fs gap); re-cycling lighting", gap)
-                    if st.get("enabled"):
-                        await asyncio.sleep(2)  # let the device settle after wake
-                        _led_apply({**st, "enabled": False})
-                        await asyncio.sleep(0.3)
-                        _led_apply(st)
-                    last_wall = time.time()
-                    cur = last = None
-                    continue
-                if not (st.get("enabled") and st.get("mode") in LED_REACTIVE_MODES):
-                    cur = last = None
-                    continue
-                target = _reactive_color(st["mode"])
-                if cur is None:
-                    cur = [float(c) for c in target]
+                enabled = st.get("enabled")
+
+                # Auto-relight: if lighting should be ON but the hardware reads OFF
+                # (a suspend/resume or a controller re-enumeration reset the rings),
+                # re-cycle off->on to restore it — the same fix as toggling RGB by
+                # hand. Checked right after a resume (big gap) and periodically. A
+                # single apply doesn't relight after a reset, so we cycle; and we
+                # back off if it won't stick, to avoid an endless loop.
+                if enabled and (gap > 5 or tick % LED_ASSERT_EVERY == 0):
+                    if _led_hw_off():
+                        if assert_fails < LED_MAX_ASSERTS:
+                            decky.logger.info("LEDs off but should be on; re-cycling")
+                            _led_apply({**st, "enabled": False})
+                            await asyncio.sleep(0.3)
+                            _led_apply(st)
+                            cur = last = None
+                            assert_fails += 1
+                    else:
+                        assert_fails = 0
+
+                # Reactive modes: ease the ring colour toward the sensor target.
+                if enabled and st.get("mode") in LED_REACTIVE_MODES:
+                    target = _reactive_color(st["mode"])
+                    if cur is None:
+                        cur = [float(c) for c in target]
+                    else:
+                        for i in range(3):
+                            cur[i] += (target[i] - cur[i]) * LED_FADE_ALPHA
+                    shown = tuple(round(c) for c in cur)
+                    # Don't hammer the shared 0b05:1b4c device with LED writes while
+                    # the gamepad is being reconnected — it can stop the pad settling.
+                    if shown != last and _controller_working():
+                        _led_apply(
+                            {**st, "mode": "solid", "split": False,
+                             "r": shown[0], "g": shown[1], "b": shown[2]}
+                        )
+                        last = shown
                 else:
-                    for i in range(3):
-                        cur[i] += (target[i] - cur[i]) * LED_FADE_ALPHA
-                shown = tuple(round(c) for c in cur)
-                # Don't hammer the shared 0b05:1b4c device with LED HID writes while
-                # the gamepad is being reconnected — it can stop the pad settling.
-                if shown != last and _controller_working():
-                    _led_apply(
-                        {**st, "mode": "solid", "split": False, "r": shown[0], "g": shown[1], "b": shown[2]}
-                    )
-                    last = shown
+                    cur = last = None
             except Exception:  # noqa: BLE001
                 decky.logger.exception("led effect loop error")
 
@@ -847,7 +875,11 @@ class Plugin:
             try:
                 if _controller_working():
                     self._ctl_fail_streak = 0
-                elif _ctl_load().get("auto_reconnect") and self._ctl_fail_streak < CTL_MAX_FAILS:
+                elif (
+                    CTL_AUTO_ENABLED
+                    and _ctl_load().get("auto_reconnect")
+                    and self._ctl_fail_streak < CTL_MAX_FAILS
+                ):
                     # First "dead" reading — confirm it's a real drop, not a transient
                     # SteamOS controller cycle (Desktop<->Game mode switch drops the
                     # pad and it re-appears on its own). Wait and re-check first.
@@ -1114,6 +1146,7 @@ class Plugin:
                 "devices": [{"dev": d["dev"], "product": d["product"], "id": d["id"]} for d in devs],
                 "working": _controller_working(),
                 "auto_reconnect": bool(_ctl_load().get("auto_reconnect", False)),
+                "auto_supported": CTL_AUTO_ENABLED,
             }
         except Exception as e:  # noqa: BLE001
             decky.logger.exception("ctl_get_status failed")

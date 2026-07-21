@@ -932,8 +932,13 @@ function ControllerBody({ active }: { active: boolean }) {
       <PanelSectionRow>
         <ToggleField
           label="Auto-reconnect when dead"
-          description="Revives the gamepad when it drops. NOTE: recent SteamOS/Steam builds changed controller handling — the reconnect can bind a transient 'XInput Controller' instead, so this may be unreliable or make things worse. Leave OFF if it misbehaves and use a warm reboot / sleep-wake instead."
-          checked={!!s?.auto_reconnect}
+          description={
+            s?.auto_supported === false
+              ? "Disabled: current SteamOS/Steam builds bind a transient 'XInput Controller' on reconnect (a known unofficial-SteamOS kernel issue), so this can't work reliably and may wedge the device. Use a warm reboot / sleep-wake instead."
+              : "Revives the gamepad automatically when it drops."
+          }
+          disabled={s?.auto_supported === false}
+          checked={!!s?.auto_reconnect && s?.auto_supported !== false}
           onChange={onAutoChange}
         />
       </PanelSectionRow>
