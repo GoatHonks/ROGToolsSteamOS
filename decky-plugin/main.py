@@ -21,6 +21,7 @@ import asyncio
 import glob
 import json
 import os
+import time
 import uuid
 
 import decky  # provided by Decky Loader at runtime
@@ -738,7 +739,7 @@ def _led_apply(st):
     back to sysfs (solid colour only) if no hidraw is available."""
     if st.get("mode") in LED_REACTIVE_MODES:
         r, g, b = _reactive_color(st["mode"])
-        st = {**st, "mode": "solid", "r": r, "g": g, "b": b}
+        st = {**st, "mode": "solid", "split": False, "r": r, "g": g, "b": b}
     if _led_apply_hid(st):
         return True
     return _led_apply_sysfs(st)
@@ -792,10 +793,20 @@ class Plugin:
         toward the sensor target each tick. Idle for solid/hardware-effect modes."""
         cur = None      # current eased colour (floats), None = snap on next target
         last = None     # last colour actually written (ints), to skip no-op writes
+        last_wall = time.time()
         while True:
             await asyncio.sleep(LED_FADE_TICK)
             try:
+                # A big wall-clock jump means we were suspended; the rings reset over
+                # suspend, so re-apply whatever mode is active on resume.
+                now = time.time()
+                resumed = now - last_wall > 5
+                last_wall = now
                 st = _led_load()
+                if resumed and st.get("enabled"):
+                    _led_apply(st)
+                    cur = last = None
+                    continue
                 if not (st.get("enabled") and st.get("mode") in LED_REACTIVE_MODES):
                     cur = last = None
                     continue
@@ -806,8 +817,12 @@ class Plugin:
                     for i in range(3):
                         cur[i] += (target[i] - cur[i]) * LED_FADE_ALPHA
                 shown = tuple(round(c) for c in cur)
-                if shown != last:
-                    _led_apply({**st, "mode": "solid", "r": shown[0], "g": shown[1], "b": shown[2]})
+                # Don't hammer the shared 0b05:1b4c device with LED HID writes while
+                # the gamepad is being reconnected — it can stop the pad settling.
+                if shown != last and _controller_working():
+                    _led_apply(
+                        {**st, "mode": "solid", "split": False, "r": shown[0], "g": shown[1], "b": shown[2]}
+                    )
                     last = shown
             except Exception:  # noqa: BLE001
                 decky.logger.exception("led effect loop error")
