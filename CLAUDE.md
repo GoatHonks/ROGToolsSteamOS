@@ -4,15 +4,20 @@ Context for continuing this project in a new session. Read this first.
 
 ## What this is
 
-An all-in-one Decky Loader plugin for the **ASUS ROG Ally X** on **SteamOS** that
-merges two earlier plugins and adds a controller fix, grouped into **collapsible
-categories** in the Quick Access panel:
+An all-in-one Decky Loader plugin for the **ASUS ROG Ally X** on **SteamOS**
+(currently **v1.1.0**), grouped into **collapsible categories** in the Quick
+Access panel:
 
-1. **Battery** — charge limit + bypass + health dashboard (from `ROGBatteryLimitBazz`)
-2. **Fan Control** — custom fan curves + named presets (from `ROGFanControlSteamOS`)
-3. **Lighting** — joystick-ring RGB (modes, Duality, per-side, battery/temp reactive),
-   our own HueSync replacement (re-applied after suspend/resume)
-4. **Settings** — small cross-cutting UI prefs (default category to open)
+1. **Battery** — charge limit + presets + 80↔100 quick toggle, bypass, health
+   dashboard (from `ROGBatteryLimitBazz`)
+2. **Fan Control** — custom fan curves + named presets + one-tap Max/Silent
+   (from `ROGFanControlSteamOS`)
+3. **Lighting** — joystick-ring RGB (modes, Duality, per-side, reactive
+   battery/temp/GPU-load, low-battery alert, live gamma calibration), our own
+   HueSync replacement (re-applied after suspend/resume)
+4. **Settings** — cross-cutting UI prefs: open behavior (remember/fixed), show/hide
+   categories, apply-lighting-at-startup, low-battery-alert threshold, About +
+   reset-all
 
 A **Controllers** category (force-reconnect + auto-reconnect watchdog for the
 cold-boot gamepad dropout) existed but was **removed**: the real fix is disabling
@@ -82,10 +87,13 @@ zones); `multi_intensity` takes **one packed 0xRRGGBB integer PER ZONE** (4 valu
 NOT 12) — writing "255 0 0 0" (255 == 0x0000FF) lit the LEFT ring blue. Separate
 `brightness` node 0–255; off = brightness 0. `_led_apply` writes the packed color
 to all zones (or per-side; zone 0 = left). We drive it directly (no HID grab), so
-`_led_apply(_led_load())` runs at startup, and `_led_effect_loop` relights on
-suspend/resume by watching the hardware `brightness` (if it reads 0 while lighting
-should be on, re-cycle off→on). Our own HueSync replacement, implemented from the
-hardware facts, not HueSync's code (BSD-3, but protocol/sysfs paths are facts).
+`_led_apply(_led_load())` runs at startup (unless `led_startup` is off), and
+`_led_effect_loop` **relights on resume**: a big wall-clock jump (`gap > 5`) means
+we were suspended, so it re-cycles off→on **unconditionally** — do NOT gate this on
+the sysfs `brightness` read, which is unreliable because HID writes don't update
+that node (that was the intermittent-relight bug). The sysfs-brightness check
+(`_led_hw_off`) is only a best-effort periodic path for non-suspend resets. Our own
+HueSync replacement, from the hardware facts, not HueSync's code (BSD-3 anyway).
 
 **HID path (primary, `_led_apply_hid`):** the sysfs multi_intensity channel balance
 is wrong (green too strong — orange needs g≈35 not 90). So colour+effects go through
@@ -99,13 +107,16 @@ Modes solid(00)/breathing(01)/duality(01+2nd colour)/rainbow(02)/spiral(03); spe
 low EB/med F0/high F5 (shifted up from stock E1/EB/F5). Per-channel **gamma**
 (`gamma_r/g/b`, default 1.0/2.0/1.2) corrects the rings' mid-level green/blue
 over-brightness — user-tunable live via calibration sliders. **Reactive** modes
-(`battery`, `temp`) are software-driven: `_led_effect_loop` (task) EASES the ring
-colour toward the sensor target each `LED_FADE_TICK` (fraction `LED_FADE_ALPHA`),
+(`battery`, `temp`, `gpu`) are software-driven: `_led_effect_loop` (task) EASES the
+ring colour toward the sensor target each `LED_FADE_TICK` (fraction `LED_FADE_ALPHA`),
 writing only while moving — smooth fade, silent at steady state. Colours from
-`_grad(BATTERY_STOPS/TEMP_STOPS, f)`. `_led_apply` routes reactive→`_reactive_color`,
-else HID, else sysfs. **Per-side** (Solid only): `split` sends the primary colour to
-zones 1,2 (left ring) and `right_*` to zones 3,4 (right ring) via per-zone HID
-set-colour commands; otherwise zone 0x00 (all).
+`_grad(BATTERY_STOPS/TEMP_STOPS/GPU_STOPS, f)`; GPU load via
+`/sys/class/drm/card*/device/gpu_busy_percent`. `_led_apply` routes
+reactive→`_reactive_color`, else HID, else sysfs. **Per-side** (Solid only):
+`split` sends the primary colour to zones 1,2 (left ring) and `right_*` to zones
+3,4 (right ring); otherwise zone 0x00 (all). **Low-battery alert** (app setting):
+the effect loop pulses the RED CHANNEL (dark↔bright, full brightness) below the
+threshold while discharging, and does a clean off→on restore when it clears.
 `_led_apply` = HID if a hidraw exists, else `_led_apply_sysfs` (solid only, off-balance).
 ⚠️ HID LED *writes* are safe (unlike the reverted interface unbind/rebind).
 
@@ -123,3 +134,34 @@ kernel-panic the ASUS WMI nodes; the probe scripts glob specific paths only.
 - Test Python logic against a fake sysfs dir before committing; TSX can't be
   compiled here — rely on on-device testing.
 - Repo: https://github.com/GoatHonks/ROGToolsSteamOS (public, branch `main`, push over SSH).
+
+## Quick actions / settings backend map
+
+- Battery: `bat_toggle_limit` (80↔100). Fan: `fan_quick("max"|"silent")` upserts a
+  dedicated "Max"/"Silent" named profile (leaves the user's own profiles intact;
+  Silent stays quiet when cool but ramps to 100% when hot — never a low top end).
+- `app_*` settings (app_state.json): `default_category`, `open_behavior`
+  (remember|fixed), `led_startup`, `hidden` (category keys), `low_batt_alert`,
+  `low_batt_pct`. `app_reset_all` deletes all state files. Frontend `Content` seeds
+  the open category from these; `SettingsBody` edits them; `VERSION` const → About.
+
+## Status (as of v1.1.0) — considered DONE
+
+Everything above works and is verified on-device (sleep relight confirmed across
+3 tests; color calibration, HID effects, per-side, reactive fade, alert restore
+all confirmed). Repo is clean and pushed.
+
+### Ideas discussed but NOT built (pick up here if continuing)
+
+- **Named lighting profiles** — save/recall whole lighting setups via a dropdown,
+  mirroring the fan profile CRUD (`add/rename/delete/select`). Highest-value next.
+- **Per-zone reactive** — e.g. left ring = battery, right ring = temp, using the
+  4 zones + the reactive engine together.
+- **CPU-load reactive** — complete the set alongside GPU load (compute from
+  `/proc/stat` deltas; there's no direct cpu_busy sysfs).
+- **Charging-aware lighting** — green pulse while plugged in; flash when the charge
+  limit is reached.
+- **Backup/restore settings**, **full-charge toast**, **timed auto-dim** (interaction-
+  based, NOT true idle — can't detect mid-game from the backend; be honest about it).
+- Deliberately declined: **FPS reactive** (not readable from backend), **true idle
+  dim** (would dim mid-game), reintroducing any **controller reconnect** (see history).
