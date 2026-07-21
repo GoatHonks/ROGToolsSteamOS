@@ -932,7 +932,7 @@ function ControllerBody({ active }: { active: boolean }) {
       <PanelSectionRow>
         <ToggleField
           label="Auto-reconnect when dead"
-          description="Watchdog revives the gamepad whenever it drops — at boot, mid-session or after resume — so you never need this menu with a dead controller"
+          description="Revives the gamepad when it drops. NOTE: recent SteamOS/Steam builds changed controller handling — the reconnect can bind a transient 'XInput Controller' instead, so this may be unreliable or make things worse. Leave OFF if it misbehaves and use a warm reboot / sleep-wake instead."
           checked={!!s?.auto_reconnect}
           onChange={onAutoChange}
         />
