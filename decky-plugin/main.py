@@ -7,7 +7,8 @@ areas whose methods are name-spaced so they can't collide:
 
     bat_*   Battery charge limit + bypass
     fan_*   Custom fan curves (named profiles)
-    ctl_*   Controllers (force-reconnect the built-in gamepad after a cold boot)
+    led_*   RGB joystick-ring lighting (modes, effects, reactive, calibration)
+    app_*   Small cross-cutting UI settings (e.g. default category)
 
 Each feature persists its own state file in DECKY_PLUGIN_SETTINGS_DIR, and the
 battery + fan features each run their own watchdog (the firmware resets both on
@@ -373,110 +374,19 @@ def _fan_enforce_once():
 
 
 # =====================================================================
-# Controllers feature (ctl_*)
+# App settings (app_*) — small cross-cutting UI prefs
 # =====================================================================
-# The ROG Ally X built-in gamepad is an ASUS USB device (vendor 0b05). After a
-# COLD boot it sometimes fails to initialize and only comes back on a warm
-# reboot, which really just re-enumerates the USB device. "Force reconnect"
-# reproduces that: toggle the USB `authorized` node (0 -> 1) on the ASUS HID
-# device(s), which makes the kernel re-enumerate them without a reboot.
-ASUS_USB_VENDOR = "0b05"
-USB_DEVICES = "/sys/bus/usb/devices"
-HID_CLASS = "03"  # bInterfaceClass for Human Interface Devices
-# Auto-reconnect-at-boot tuning. Instead of blindly toggling on a timer (which
-# spams connect/disconnect, drops LED plugins like HueSync, and re-runs on every
-# Decky reload), we only act on a genuine boot and only when the pad is actually
-# dead, stopping the moment it works.
-CTL_INITIAL_WAIT = 10          # let SteamOS bring the pad up before the first check
-CTL_WATCHDOG_SECONDS = 15      # how often to check the gamepad is alive
-CTL_SETTLE_SECONDS = 8         # after a first "dead" reading, wait+recheck before acting
-                               # (a Desktop<->Game mode switch cycles the pad and it
-                               # self-recovers; don't fight SteamOS's own reconnect)
-CTL_POST_RECONNECT_GRACE = 8   # wait after a reconnect before re-checking
-CTL_MAX_FAILS = 5              # after this many failed reconnects in a row, back off
-                               # until the pad recovers (avoids endless retry spam)
-# Feature-disabled: on current SteamOS/Steam builds the re-enumeration binds a
-# transient "XInput Controller" and can wedge the device (dead power button), a
-# known unofficial-SteamOS kernel handshake issue we can't fix from here. Keep the
-# watchdog/detection code, but never auto-reconnect until this is set True again.
-CTL_AUTO_ENABLED = False
+def _app_state_path():
+    return os.path.join(_settings_dir(), "app_state.json")
 
 
-def _ctl_state_path():
-    return os.path.join(_settings_dir(), "controller_state.json")
+def _app_load():
+    st = _load_json(_app_state_path(), {})
+    return {"default_category": st.get("default_category", "")}
 
 
-def _ctl_load():
-    return _load_json(_ctl_state_path(), {})
-
-
-def _ctl_save(state):
-    _save_json(_ctl_state_path(), state)
-
-
-# The Ally X gamepad enumerates in XInput mode as a "Microsoft X-Box 360 pad".
-# That input node is what actually carries gamepad input and what Steam lists as
-# a controller. The separate "ASUS ROG Ally X Gamepad" HID/N-KEY node is ALWAYS
-# present (config/hotkeys) even when the pad is dead, so it can't be the signal.
-# On a cold-boot dropout the X-Box 360 pad node is missing; when working it's there.
-GAMEPAD_NAME_HINTS = ("x-box 360", "xbox 360")
-
-
-def _controller_working():
-    """True if the functional gamepad (XInput "X-Box 360 pad") input node exists."""
-    for js in glob.glob("/sys/class/input/js*"):
-        name = _read_str(os.path.join(js, "device", "name")).lower()
-        if any(h in name for h in GAMEPAD_NAME_HINTS):
-            return True
-    return False
-
-
-def _usb_dev_dirs():
-    """Real USB device dirs (skip interfaces like '3-2:1.0' and usbN root hubs)."""
-    for path in sorted(glob.glob(f"{USB_DEVICES}/*")):
-        base = os.path.basename(path)
-        if ":" in base or base.startswith("usb"):
-            continue
-        if os.path.exists(os.path.join(path, "idVendor")):
-            yield path
-
-
-def _usb_has_hid(dev_path):
-    dev = os.path.basename(dev_path)
-    for iface in glob.glob(f"{dev_path}/{dev}:*/bInterfaceClass"):
-        if _read_str(iface) == HID_CLASS:
-            return True
-    return False
-
-
-def _controller_candidates():
-    """ASUS (0b05) USB devices that expose an HID interface — the gamepad(s)."""
-    out = []
-    for dev_path in _usb_dev_dirs():
-        if _read_str(os.path.join(dev_path, "idVendor")).lower() != ASUS_USB_VENDOR:
-            continue
-        if not _usb_has_hid(dev_path):
-            continue
-        out.append({
-            "dev": os.path.basename(dev_path),
-            "path": dev_path,
-            "product": _read_str(os.path.join(dev_path, "product")),
-            "id": f"{_read_str(os.path.join(dev_path, 'idVendor'))}:"
-                  f"{_read_str(os.path.join(dev_path, 'idProduct'))}",
-        })
-    return out
-
-
-async def _reconnect_device(dev_path):
-    """Re-enumerate one USB device via the authorized toggle. Returns True on success."""
-    node = os.path.join(dev_path, "authorized")
-    if not os.path.exists(node):
-        return False
-    _write(node, 0)
-    await asyncio.sleep(1.0)
-    _write(node, 1)
-    await asyncio.sleep(0.3)
-    return True
+def _app_save(st):
+    _save_json(_app_state_path(), st)
 
 
 # =====================================================================
@@ -805,18 +715,13 @@ class Plugin:
         # Fan: re-assert the custom curve if armed.
         _fan_enforce_once()
         self._fan_task = asyncio.create_task(self._fan_watchdog())
-        # Controllers: if enabled, watch the gamepad and reconnect whenever it's
-        # dead — at boot, mid-session, or after resume — so the cold-boot (and
-        # later) dropout self-heals without the (controller-driven) menu.
-        self._ctl_fail_streak = 0
-        self._ctl_task = asyncio.create_task(self._ctl_watchdog())
-        # Lighting: re-assert the saved RGB now (a boot / earlier reconnect may
-        # have reset the rings). Safe write, independent of the controller.
+        # Lighting: re-assert the saved RGB now (a boot / resume may have reset the
+        # rings); the effect loop keeps reactive modes updated and relights on resume.
         _led_apply(_led_load())
         self._led_task = asyncio.create_task(self._led_effect_loop())
 
     async def _unload(self):
-        for attr in ("_bat_task", "_fan_task", "_ctl_task", "_led_task"):
+        for attr in ("_bat_task", "_fan_task", "_led_task"):
             task = getattr(self, attr, None)
             if task:
                 task.cancel()
@@ -877,9 +782,7 @@ class Plugin:
                         for i in range(3):
                             cur[i] += (target[i] - cur[i]) * LED_FADE_ALPHA
                     shown = tuple(round(c) for c in cur)
-                    # Don't hammer the shared 0b05:1b4c device with LED writes while
-                    # the gamepad is being reconnected — it can stop the pad settling.
-                    if shown != last and _controller_working():
+                    if shown != last:
                         _led_apply(
                             {**st, "mode": "solid", "split": False,
                              "r": shown[0], "g": shown[1], "b": shown[2]}
@@ -890,56 +793,26 @@ class Plugin:
             except Exception:  # noqa: BLE001
                 decky.logger.exception("led effect loop error")
 
-    async def _ctl_watchdog(self):
-        """Keep the built-in gamepad alive: reconnect whenever it goes dead.
+    # ---------------------------------------------------------------
+    # App settings
+    # ---------------------------------------------------------------
+    async def app_get_settings(self):
+        try:
+            return {"ok": True, **_app_load()}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.exception("app_get_settings failed")
+            return {"ok": False, "error": str(e)}
 
-        Only ever acts while the pad is actually dead (no X-Box 360 pad node), so a
-        working controller is never toggled — a Decky reload or normal boot with a
-        live pad does nothing. After CTL_MAX_FAILS reconnects that don't take, it
-        backs off until the pad recovers on its own, to avoid endless retry spam.
-        """
-        await asyncio.sleep(CTL_INITIAL_WAIT)  # let SteamOS bring it up first
-        while True:
-            try:
-                if _controller_working():
-                    self._ctl_fail_streak = 0
-                elif (
-                    CTL_AUTO_ENABLED
-                    and _ctl_load().get("auto_reconnect")
-                    and self._ctl_fail_streak < CTL_MAX_FAILS
-                ):
-                    # First "dead" reading — confirm it's a real drop, not a transient
-                    # SteamOS controller cycle (Desktop<->Game mode switch drops the
-                    # pad and it re-appears on its own). Wait and re-check first.
-                    await asyncio.sleep(CTL_SETTLE_SECONDS)
-                    if _controller_working():
-                        self._ctl_fail_streak = 0
-                        decky.logger.info("Controller self-recovered (transient cycle); skipping")
-                    else:
-                        decky.logger.info(
-                            "Controller dead; auto-reconnect (streak %d)", self._ctl_fail_streak
-                        )
-                        try:
-                            await self.ctl_reconnect()
-                        except Exception:  # noqa: BLE001
-                            decky.logger.exception("watchdog reconnect failed")
-                        await asyncio.sleep(CTL_POST_RECONNECT_GRACE)
-                        if _controller_working():
-                            self._ctl_fail_streak = 0
-                            decky.logger.info("Controller recovered")
-                            # The reconnect re-enumerated the device and reset the
-                            # rings — restore the user's lighting immediately.
-                            _led_apply(_led_load())
-                        else:
-                            self._ctl_fail_streak += 1
-                            if self._ctl_fail_streak >= CTL_MAX_FAILS:
-                                decky.logger.warning(
-                                    "Controller still dead after %d tries; backing off "
-                                    "until it recovers", CTL_MAX_FAILS
-                                )
-            except Exception:  # noqa: BLE001
-                decky.logger.exception("ctl watchdog error")
-            await asyncio.sleep(CTL_WATCHDOG_SECONDS)
+    async def app_set_settings(self, patch):
+        try:
+            st = _app_load()
+            if patch.get("default_category") is not None:
+                st["default_category"] = str(patch["default_category"])
+            _app_save(st)
+            return {"ok": True, **st}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.exception("app_set_settings failed")
+            return {"ok": False, "error": str(e)}
 
     # ---------------------------------------------------------------
     # Battery
@@ -1160,58 +1033,6 @@ class Plugin:
             return {"ok": True, "active": state["active"], "profiles": _public_profiles(state)}
         except Exception as e:  # noqa: BLE001
             decky.logger.exception("fan_delete_profile failed")
-            return {"ok": False, "error": str(e)}
-
-    # ---------------------------------------------------------------
-    # Controllers
-    # ---------------------------------------------------------------
-    async def ctl_get_status(self):
-        try:
-            devs = _controller_candidates()
-            return {
-                "ok": True,
-                "count": len(devs),
-                "devices": [{"dev": d["dev"], "product": d["product"], "id": d["id"]} for d in devs],
-                "working": _controller_working(),
-                "auto_reconnect": bool(_ctl_load().get("auto_reconnect", False)),
-                "auto_supported": CTL_AUTO_ENABLED,
-            }
-        except Exception as e:  # noqa: BLE001
-            decky.logger.exception("ctl_get_status failed")
-            return {"ok": False, "error": str(e)}
-
-    async def ctl_set_auto(self, on: bool):
-        """Toggle auto-reconnect at plugin startup (i.e. at boot)."""
-        try:
-            state = _ctl_load()
-            state["auto_reconnect"] = bool(on)
-            _ctl_save(state)
-            return {"ok": True, "auto_reconnect": bool(on)}
-        except Exception as e:  # noqa: BLE001
-            decky.logger.exception("ctl_set_auto failed")
-            return {"ok": False, "error": str(e)}
-
-    async def ctl_reconnect(self):
-        """Force-re-enumerate the ASUS HID (gamepad) USB devices — cold-boot fix."""
-        try:
-            devs = _controller_candidates()
-            if not devs:
-                return {"ok": False, "error": "No ASUS HID (0b05) USB device found"}
-            done = 0
-            for d in devs:
-                try:
-                    if await _reconnect_device(d["path"]):
-                        done += 1
-                        decky.logger.info("Reconnected controller %s (%s)", d["dev"], d["id"])
-                except OSError:
-                    decky.logger.exception("reconnect %s failed", d["dev"])
-            if done == 0:
-                return {"ok": False, "error": "Found controller(s) but couldn't toggle authorized"}
-            # Re-enumeration reset the rings — restore lighting right away.
-            _led_apply(_led_load())
-            return {"ok": True, "reconnected": done}
-        except Exception as e:  # noqa: BLE001
-            decky.logger.exception("ctl_reconnect failed")
             return {"ok": False, "error": str(e)}
 
     # ---------------------------------------------------------------

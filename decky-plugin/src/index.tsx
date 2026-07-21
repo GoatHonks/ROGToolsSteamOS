@@ -16,7 +16,8 @@ import { useEffect, useState, type ReactNode } from "react";
 import {
   FaBatteryHalf,
   FaFan,
-  FaGamepad,
+  FaLightbulb,
+  FaCog,
   FaChevronDown,
   FaChevronRight,
   FaToolbox,
@@ -39,13 +40,12 @@ const fanSelectProfile = callable<[pid: string], any>("fan_select_profile");
 const fanAddProfile = callable<[name: string, copyActive: boolean], any>("fan_add_profile");
 const fanRenameProfile = callable<[pid: string, name: string], any>("fan_rename_profile");
 const fanDeleteProfile = callable<[pid: string], any>("fan_delete_profile");
-// Controllers
-const ctlGetStatus = callable<[], any>("ctl_get_status");
-const ctlReconnect = callable<[], any>("ctl_reconnect");
-const ctlSetAuto = callable<[on: boolean], any>("ctl_set_auto");
 // Lighting
 const ledGetStatus = callable<[], any>("led_get_status");
 const ledSet = callable<[patch: any], any>("led_set");
+// App settings
+const appGetSettings = callable<[], any>("app_get_settings");
+const appSetSettings = callable<[patch: any], any>("app_set_settings");
 
 const toast = (title: string, body: string) => toaster.toast({ title, body });
 const failToast = (title: string, r: any) => {
@@ -578,7 +578,7 @@ function FanBody({ active }: { active: boolean }) {
 }
 
 // ============================================================
-// Controllers category
+// Lighting category
 // ============================================================
 // RGB joystick-ring lighting. Driven via the ASUS HID protocol (accurate color +
 // hardware effects), re-applied by the backend after a controller reconnect.
@@ -717,12 +717,9 @@ function LightingControls({ active }: { active: boolean }) {
   if (!s) return null;
   if (!s.ok || !s.available) {
     return (
-      <>
-        <SubHeader first>Lighting</SubHeader>
-        <PanelSectionRow>
-          <div style={{ fontSize: "0.8em", opacity: 0.7 }}>No RGB LED found on this device.</div>
-        </PanelSectionRow>
-      </>
+      <PanelSectionRow>
+        <div style={{ fontSize: "0.8em", opacity: 0.7 }}>No RGB LED found on this device.</div>
+      </PanelSectionRow>
     );
   }
 
@@ -749,7 +746,6 @@ function LightingControls({ active }: { active: boolean }) {
 
   return (
     <>
-      <SubHeader first>Lighting</SubHeader>
       <PanelSectionRow>
         <ToggleField
           label="RGB lighting"
@@ -880,72 +876,42 @@ function LightingControls({ active }: { active: boolean }) {
   );
 }
 
-function ControllerBody({ active }: { active: boolean }) {
-  const [s, setS] = useState<any>(null);
-  const [busy, setBusy] = useState(false);
+// Categories the "open by default" setting can point at (Settings excluded).
+const DEFAULT_CATEGORY_OPTIONS = [
+  { key: "", title: "None (all collapsed)" },
+  { key: "battery", title: "Battery" },
+  { key: "fan", title: "Fan Control" },
+  { key: "lighting", title: "Lighting" },
+];
 
-  const refresh = async () => {
-    setS(await ctlGetStatus());
-  };
+function SettingsBody({ active }: { active: boolean }) {
+  const [dc, setDc] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!active) return;
-    refresh();
-    const id = setInterval(refresh, 5000);
-    return () => clearInterval(id);
+    if (active) appGetSettings().then((r) => setDc(r?.ok ? r.default_category ?? "" : ""));
   }, [active]);
 
-  const onReconnect = async () => {
-    setBusy(true);
-    const r = await ctlReconnect();
-    setBusy(false);
-    if (failToast("ROG Controllers", r)) {
-      toast("ROG Controllers", `Reconnected ${r.reconnected} device${r.reconnected === 1 ? "" : "s"}`);
-      refresh();
-    }
-  };
-
-  const onAutoChange = async (on: boolean) => {
-    if (failToast("ROG Controllers", await ctlSetAuto(on))) refresh();
-  };
-
-  const detected =
-    s == null ? "…" : !s.ok ? `Error: ${s.error}` : s.count === 0 ? "None detected" : `${s.count} detected`;
-  const inputState = s == null || !s.ok ? "…" : s.working ? "Working" : "Not detected";
-
+  if (dc === null) return null;
   return (
     <>
-      <LightingControls active={active} />
-
-      <SubHeader>Controller Status</SubHeader>
-      <Stat label="Gamepad input" value={inputState} />
-      <Stat label="ASUS controllers" value={detected} />
-      {s?.ok &&
-        (s.devices ?? []).map((d: any) => (
-          <Stat key={d.dev} label={d.product || d.dev} value={d.id} />
-        ))}
       <PanelSectionRow>
-        <ButtonItem layout="below" disabled={busy} onClick={onReconnect}>
-          {busy ? "Reconnecting…" : "Force reconnect controllers"}
-        </ButtonItem>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ToggleField
-          label="Auto-reconnect when dead"
-          description={
-            s?.auto_supported === false
-              ? "Disabled: current SteamOS/Steam builds bind a transient 'XInput Controller' on reconnect (a known unofficial-SteamOS kernel issue), so this can't work reliably and may wedge the device. Use a warm reboot / sleep-wake instead."
-              : "Revives the gamepad automatically when it drops."
-          }
-          disabled={s?.auto_supported === false}
-          checked={!!s?.auto_reconnect && s?.auto_supported !== false}
-          onChange={onAutoChange}
-        />
+        <div style={{ width: "100%" }}>
+          <div style={{ fontSize: "0.8em", opacity: 0.7, marginBottom: "4px" }}>
+            Category open by default
+          </div>
+          <Dropdown
+            rgOptions={DEFAULT_CATEGORY_OPTIONS.map((o) => ({ label: o.title, data: o.key }))}
+            selectedOption={dc}
+            onChange={(o) => {
+              setDc(o.data);
+              appSetSettings({ default_category: o.data });
+            }}
+          />
+        </div>
       </PanelSectionRow>
       <PanelSectionRow>
         <div style={{ fontSize: "0.75em", opacity: 0.6 }}>
-          Re-enumerates the built-in gamepad without a reboot. Use the button if the controller is
-          dead after a cold boot; leave the toggle on so drops fix themselves.
+          Which category is expanded when you first open ROGTools.
         </div>
       </PanelSectionRow>
     </>
@@ -954,6 +920,7 @@ function ControllerBody({ active }: { active: boolean }) {
 
 // ============================================================
 // Category registry — add a new entry here to add a category later.
+// Settings stays last.
 // ============================================================
 const CATEGORIES: {
   key: string;
@@ -963,18 +930,31 @@ const CATEGORIES: {
 }[] = [
   { key: "battery", title: "Battery", icon: <FaBatteryHalf />, body: BatteryBody },
   { key: "fan", title: "Fan Control", icon: <FaFan />, body: FanBody },
-  { key: "controllers", title: "Controllers", icon: <FaGamepad />, body: ControllerBody },
+  { key: "lighting", title: "Lighting", icon: <FaLightbulb />, body: LightingControls },
+  { key: "settings", title: "Settings", icon: <FaCog />, body: SettingsBody },
 ];
 
 // Remembered open/closed state, kept at module scope so it survives the panel
-// unmounting when the user closes and reopens Quick Access.
+// unmounting when the user closes and reopens Quick Access. Seeded once per
+// session from the user's "open by default" setting.
 let persistedOpen: Record<string, boolean> = {};
+let seededDefault = false;
 
 function Content() {
-  // Start from whatever was open last time; each arrow toggles its own category
-  // independently (open several at once if you want) and stays that way until
-  // you close it again.
   const [open, setOpen] = useState<Record<string, boolean>>(persistedOpen);
+
+  // On first open of the session, expand the user's chosen default category.
+  useEffect(() => {
+    if (seededDefault) return;
+    seededDefault = true;
+    appGetSettings().then((r) => {
+      const dc = r?.ok ? r.default_category : "";
+      if (dc) {
+        persistedOpen = { [dc]: true };
+        setOpen(persistedOpen);
+      }
+    });
+  }, []);
   const toggle = (key: string) =>
     setOpen((o) => {
       const next = { ...o, [key]: !o[key] };

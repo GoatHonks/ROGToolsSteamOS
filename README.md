@@ -1,10 +1,10 @@
 # ROGTools (SteamOS)
 
 An all-in-one [Decky Loader](https://decky.xyz) plugin for the **ASUS ROG Ally X**
-on **SteamOS**. Battery, cooling, controllers and RGB — organised into
-**collapsible categories** in the Quick Access menu so the panel stays tidy (tap a
-category's arrow to expand/collapse it). It replaces the author's separate battery
-and fan plugins and folds in a controller fix and full RGB lighting control.
+on **SteamOS**. Battery, cooling and RGB — organised into **collapsible categories** in the Quick
+Access menu so the panel stays tidy (tap a category's arrow to expand/collapse it).
+It replaces the author's separate battery and fan plugins and adds full RGB
+lighting control.
 
 ## Features
 
@@ -21,28 +21,29 @@ and fan plugins and folds in a controller fix and full RGB lighting control.
   8-point curves (CPU + GPU), named presets, live temps/RPM.
 - A watchdog re-arms the curve after a performance-profile switch or resume.
 
-### 🎮 Controllers
-- **Force reconnect** the built-in gamepad after the cold-boot dropout — it
-  re-enumerates the ASUS HID device **without** a reboot.
-- **Auto-reconnect** watchdog: detects when the gamepad is dead (no
-  `Microsoft X-Box 360 pad` input node) and revives it automatically — at boot,
-  mid-session, or after resume. It only acts when the pad is actually dead
-  (ignores transient Desktop⇄Game mode cycles) and backs off if a reconnect
-  can't fix it, so it never spams.
-
 ### 💡 Lighting
 Full control of the joystick-ring RGB — a self-contained replacement for HueSync,
-driven directly so it **survives controller reconnects** (the LEDs are re-applied
-the instant the gamepad is re-enumerated).
+driven directly (sysfs + the ASUS HID protocol) and re-applied automatically after
+a suspend/resume.
 - **Modes:** Solid, Breathing, **Duality** (breathe between two colors),
   Rainbow, Spiral.
+- **Per-side colors** (Solid): independent left/right ring colors.
 - **Reactive modes** (ROGTools-only): **Battery level** (red → yellow → green)
-  and **Temperature** (blue → yellow → red), updated live from the sensors.
+  and **Temperature** (blue → yellow → red), updated live from the sensors with
+  smooth fading.
 - HSV color picker (hue spectrum + saturation) with a hex field and presets;
   brightness and effect-speed controls.
 - Live **color calibration** (per-channel gamma) so mixed colors match the swatch.
 
+### ⚙️ Settings
+- Choose which category is **open by default** when you open ROGTools.
+
 More categories can be added without restructuring — see `CLAUDE.md`.
+
+> **Controllers:** the built-in gamepad dropping out after a cold boot is a
+> **BIOS Fast Boot** issue — disable *Fast Boot* in the ASUS BIOS and it connects
+> reliably. (Earlier versions shipped a software reconnect; it became unreliable on
+> current SteamOS builds and was removed in favour of the real fix.)
 
 ## Install (on the device)
 
@@ -68,12 +69,11 @@ plugins don't fight over the same sysfs/HID nodes.
 
 ## Diagnostics (read-only)
 
-Handy if something doesn't match your unit:
+Handy if the lighting doesn't match your unit:
 
 ```bash
 cd decky-plugin
-./probe-controller.sh    # lists the ASUS HID gamepad + the "working" detection signal
-./probe-leds.sh          # maps the RGB LED sysfs node
+./probe-leds.sh                  # maps the RGB LED sysfs node
 sudo python3 probe-leds-hid.py   # tests the HID effects path (rainbow / solid)
 ```
 
@@ -83,9 +83,6 @@ sudo python3 probe-leds-hid.py   # tests the HID effects path (rainbow / solid)
   ```bash
   for f in 1 2; do echo 2 | sudo tee /sys/class/hwmon/hwmon*/pwm${f}_enable >/dev/null; done
   ```
-- The controller reconnect re-enumerates the whole ASUS HID device (an interface-
-  only reset was tried and reverted — it caused a boot loop). This briefly resets
-  the LEDs, which ROGTools re-applies automatically.
 
 Tested on the ROG Ally X, SteamOS (kernel 6.x). Not affiliated with ASUS or Valve.
 RGB protocol reimplemented from the documented ASUS/hhd/HueSync hardware interface.

@@ -10,9 +10,14 @@ categories** in the Quick Access panel:
 
 1. **Battery** — charge limit + bypass + health dashboard (from `ROGBatteryLimitBazz`)
 2. **Fan Control** — custom fan curves + named presets (from `ROGFanControlSteamOS`)
-3. **Controllers** — force-reconnect + auto-reconnect watchdog for the gamepad dropout
-4. **Lighting** — joystick-ring RGB (modes, Duality, battery/temp reactive), our
-   own HueSync replacement (re-applied after a controller reconnect)
+3. **Lighting** — joystick-ring RGB (modes, Duality, per-side, battery/temp reactive),
+   our own HueSync replacement (re-applied after suspend/resume)
+4. **Settings** — small cross-cutting UI prefs (default category to open)
+
+A **Controllers** category (force-reconnect + auto-reconnect watchdog for the
+cold-boot gamepad dropout) existed but was **removed**: the real fix is disabling
+**BIOS Fast Boot**, and the software reconnect became unreliable / harmful on
+current SteamOS builds (see history below). The `ctl_*` code is gone.
 
 It supersedes the two source plugins (and HueSync for LEDs); only one should be
 installed at a time or
@@ -31,15 +36,15 @@ their watchdogs fight over the same sysfs nodes.
 decky-plugin/
   main.py        ONE root Plugin class (Decky loads only one). Split into three
                  name-spaced feature groups so methods can't collide:
-                   bat_*  battery   fan_*  fan curves   ctl_*  controllers
-                   led_*  RGB joystick-ring lighting
+                   bat_*  battery   fan_*  fan curves   led_*  RGB lighting
+                   app_*  small cross-cutting UI settings
                  Each feature keeps its OWN state file in DECKY_PLUGIN_SETTINGS_DIR
-                 (battery_state.json / fan_state.json). Battery + fan each run a
-                 watchdog started in _main.
+                 (battery_state.json / fan_state.json / led_state.json /
+                 app_state.json). Battery + fan run a watchdog; lighting runs an
+                 effect loop (reactive fade + resume relight), all started in _main.
   src/index.tsx  Quick Access UI. `CATEGORIES` registry drives collapsible
-                 `Category` sections; each has a self-contained Body component
-                 that only polls while expanded (`active` prop).
-  probe-controller.sh   Read-only: lists ASUS HID USB devices the reconnect targets.
+                 `Category` sections (Settings stays last); each has a
+                 self-contained Body component that only polls while expanded.
   install.sh / update.sh / uninstall.sh / package-zip.sh   nvm/pnpm build flow,
                  same as the source plugins. Plugin dir name: rog-tools-steamos.
 ```
@@ -51,42 +56,23 @@ decky-plugin/
 2. Add a `<Prefix>Body({ active })` component + a `CATEGORIES` entry in `index.tsx`.
    Nothing is wired by naming convention beyond the `callable("<method>")` strings.
 
-## Controllers feature (the new part)
+## Controllers feature — REMOVED (history / do not resurrect blindly)
 
-Cold boot (and sometimes a few minutes into a session) leaves the built-in gamepad
-uninitialised; a warm reboot fixes it because it re-enumerates the USB device.
-`ctl_reconnect` reproduces that WITHOUT a reboot: find ASUS (vendor `0b05`) USB
-devices that have an HID interface (`bInterfaceClass == 03`) and toggle their USB
-`authorized` node `0 → 1` (1s pause). `_usb_dev_dirs` skips interface dirs
-(`3-2:1.0`) and root hubs (`usbN`). **Verified on-device** on an Ally X: the target
-is `0b05:1b4c` "N-KEY Device" and the toggle revives the pad.
+There used to be a `ctl_*` category that force-reconnected the built-in gamepad
+after the cold-boot dropout (toggling the USB `authorized` node on the ASUS
+`0b05:1b4c` device). **The real fix turned out to be disabling BIOS Fast Boot** —
+with that off the pad connects reliably, so the whole feature was removed.
 
-Detection (verified): the always-present `0b05` device / the `ASUS ROG Ally X
-Gamepad` js node are NOT the signal — they exist even when the pad is dead. The
-functional pad enumerates in XInput mode as a **`Microsoft X-Box 360 pad`**
-joystick, which is absent on a dropout. `_controller_working()` keys off that
-`js*` device name (`GAMEPAD_NAME_HINTS`).
-
-Auto-reconnect is a **watchdog** (`_ctl_watchdog`), not a one-shot/timer: every
-`CTL_WATCHDOG_SECONDS` it reconnects only while the pad is dead, resets on
-recovery, and backs off after `CTL_MAX_FAILS` failures until it recovers. This
-handles cold-boot AND mid-session/post-resume dropouts, and never toggles a
-working pad (so Decky reloads don't disturb it). Opt-in via `ctl_set_auto`.
-
-- Earlier blind approaches (single 3s shot; 15/30/45 timer; boot-only loop) were
-  rejected: too-early toggles don't stick, and blind toggling spammed connect/
-  disconnect notifications, dropped HueSync LEDs, and re-ran on Decky reload.
-- ⚠️⚠️ **A "surgical" unbind/rebind of just the gamepad interface (`1-2:1.5`) via
-  `/sys/bus/usb/drivers/usbhid/{unbind,bind}` — meant to spare the LED interface
-  and HueSync — caused a full BOOT LOOP on SteamOS** (yanking the gamepad HID out
-  during Steam Input's startup crashes the gamescope session, which restarts and
-  re-triggers it). Reverted. Recovery required deleting the plugin dir from a
-  live/recovery environment. Do NOT reintroduce interface unbind/rebind in the
-  boot/watchdog path. The whole-device `authorized` toggle (`_reconnect_device`)
-  is the only reconnect method known safe here — it resets LEDs too (HueSync must
-  be re-toggled), which is an accepted tradeoff.
-- ⚠️ Don't broaden the target beyond ASUS HID devices without care — toggling
-  `authorized` on the wrong 0b05 device (MCU, etc.) could disrupt input.
+Hard-won reasons it's gone (don't reintroduce without remembering these):
+- ⚠️⚠️ A "surgical" unbind/rebind of just the gamepad interface (`1-2:1.5`) via
+  `/sys/bus/usb/drivers/usbhid/{unbind,bind}` caused a full **BOOT LOOP** on
+  SteamOS (recovery needed deleting the plugin dir from a live USB).
+- On later SteamOS/Steam builds the whole-device `authorized` toggle started
+  binding a transient "XInput Controller" and could wedge the device (dead power
+  button). It's a kernel-driver handshake issue a Decky plugin can't fix.
+- Detection that worked: the functional pad is the `Microsoft X-Box 360 pad` js
+  node (absent on a dropout); the always-present `ASUS ROG Ally X Gamepad` node is
+  NOT the signal. (Kept here in case it's ever useful again.)
 
 ## Lighting feature (led_*)
 
@@ -94,12 +80,12 @@ RGB stick rings live at `/sys/class/leds/ally:rgb:joystick_rings` (a Linux
 multicolor LED). **Verified on-device:** `multi_index` = "rgb rgb rgb rgb" (4
 zones); `multi_intensity` takes **one packed 0xRRGGBB integer PER ZONE** (4 values,
 NOT 12) — writing "255 0 0 0" (255 == 0x0000FF) lit the LEFT ring blue. Separate
-`brightness` node 0–255; off = brightness 0. `_led_apply` writes the same packed
-color to all zones (per-zone is a future step; zone 0 = left). We drive sysfs
-directly (no HID grab), so `_led_apply(_led_load())` is called at startup AND after
-every controller reconnect (which resets the rings) — this is our own replacement
-for HueSync and why owning it matters. Implemented from the hardware facts, not
-HueSync's code (BSD-3, but protocol/sysfs paths are non-copyrightable facts).
+`brightness` node 0–255; off = brightness 0. `_led_apply` writes the packed color
+to all zones (or per-side; zone 0 = left). We drive it directly (no HID grab), so
+`_led_apply(_led_load())` runs at startup, and `_led_effect_loop` relights on
+suspend/resume by watching the hardware `brightness` (if it reads 0 while lighting
+should be on, re-cycle off→on). Our own HueSync replacement, implemented from the
+hardware facts, not HueSync's code (BSD-3, but protocol/sysfs paths are facts).
 
 **HID path (primary, `_led_apply_hid`):** the sysfs multi_intensity channel balance
 is wrong (green too strong — orange needs g≈35 not 90). So colour+effects go through
