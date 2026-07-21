@@ -798,13 +798,20 @@ class Plugin:
             await asyncio.sleep(LED_FADE_TICK)
             try:
                 # A big wall-clock jump means we were suspended; the rings reset over
-                # suspend, so re-apply whatever mode is active on resume.
+                # suspend, so re-apply on resume. A single apply isn't enough — the
+                # device needs an off->on cycle (same as toggling RGB manually).
                 now = time.time()
-                resumed = now - last_wall > 5
+                gap = now - last_wall
                 last_wall = now
                 st = _led_load()
-                if resumed and st.get("enabled"):
-                    _led_apply(st)
+                if gap > 5:
+                    decky.logger.info("Resume detected (%.0fs gap); re-cycling lighting", gap)
+                    if st.get("enabled"):
+                        await asyncio.sleep(2)  # let the device settle after wake
+                        _led_apply({**st, "enabled": False})
+                        await asyncio.sleep(0.3)
+                        _led_apply(st)
+                    last_wall = time.time()
                     cur = last = None
                     continue
                 if not (st.get("enabled") and st.get("mode") in LED_REACTIVE_MODES):
