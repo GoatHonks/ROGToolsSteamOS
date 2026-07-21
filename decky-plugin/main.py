@@ -825,19 +825,29 @@ class Plugin:
                     _led_apply(st)
                     cur = last = None
 
-                # Auto-relight: if lighting should be ON but the hardware reads OFF
-                # (a suspend/resume reset the rings), re-cycle off->on to restore it
-                # — the same fix as toggling RGB by hand. Checked right after a resume
-                # (big gap) and periodically. A single apply doesn't relight after a
-                # reset, so we cycle; and we keep trying every check until it sticks
-                # (no permanent giveup — the device can be slow to come back).
-                if enabled and (gap > 5 or tick % LED_ASSERT_EVERY == 0):
-                    if _led_hw_off():
-                        decky.logger.info("RGB reads off but should be on; re-cycling off->on")
-                        _led_apply({**st, "enabled": False})
-                        await asyncio.sleep(0.3)
-                        _led_apply(st)
-                        cur = last = None
+                # Auto-relight after a resume. A big wall-clock jump means we were
+                # suspended and the rings reset. We relight UNCONDITIONALLY here — we
+                # can't trust the sysfs `brightness` read (we drive the rings over HID,
+                # which doesn't update that node), so the resume signal itself is what
+                # we key off. Settle first (the device is slow to wake), then off->on.
+                if enabled and gap > 5:
+                    decky.logger.info("Resume detected (%.0fs gap); relighting", gap)
+                    await asyncio.sleep(2)
+                    _led_apply({**st, "enabled": False})
+                    await asyncio.sleep(0.3)
+                    _led_apply(st)
+                    cur = last = None
+                    last_wall = time.time()
+                    continue
+
+                # Best-effort periodic relight for non-suspend resets, when the sysfs
+                # brightness DOES read 0 while lighting should be on.
+                if enabled and tick % LED_ASSERT_EVERY == 0 and _led_hw_off():
+                    decky.logger.info("RGB reads off but should be on; re-cycling off->on")
+                    _led_apply({**st, "enabled": False})
+                    await asyncio.sleep(0.3)
+                    _led_apply(st)
+                    cur = last = None
 
                 # Reactive modes: ease the ring colour toward the sensor target.
                 if enabled and st.get("mode") in LED_REACTIVE_MODES:
