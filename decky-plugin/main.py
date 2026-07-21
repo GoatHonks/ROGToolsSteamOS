@@ -815,8 +815,13 @@ class Plugin:
                     alerting = True
                     continue
                 if alerting:
-                    # Alert just cleared — restore the user's normal lighting.
+                    # Alert just cleared — restore the user's normal lighting with a
+                    # clean off->on so the firmware fully drops the alert's rapid solid
+                    # writes and returns to the saved mode/effect (a single apply can
+                    # leave effect residue).
                     alerting = False
+                    _led_apply({**st, "enabled": False})
+                    await asyncio.sleep(0.3)
                     _led_apply(st)
                     cur = last = None
 
