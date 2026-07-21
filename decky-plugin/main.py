@@ -21,9 +21,12 @@ a matching category block in src/index.tsx. Nothing else is wired by name.
 import asyncio
 import glob
 import json
+import math
 import os
 import time
 import uuid
+
+VERSION = "1.1.0"
 
 import decky  # provided by Decky Loader at runtime
 
@@ -189,6 +192,16 @@ DEFAULT_CURVES = {
     1: [(33, 5), (42, 17), (50, 29), (60, 41), (71, 49), (81, 60), (91, 60), (100, 60)],
     2: [(33, 9), (42, 16), (50, 24), (60, 41), (71, 59), (81, 76), (91, 76), (100, 76)],
 }
+# Quick presets: Max = full blast; Silent = quiet when cool but still ramps up to
+# protect the APU when hot (never a dangerously low top end).
+SILENT_PCTS = [0, 0, 10, 20, 40, 60, 80, 100]
+
+
+def _quick_curve(kind, fan):
+    temps = [t for t, _ in DEFAULT_CURVES[fan]]
+    if kind == "max":
+        return [[t, 100] for t in temps]
+    return [[temps[i], SILENT_PCTS[i]] for i in range(NUM_POINTS)]
 
 
 def _hwmon_by_name(name):
@@ -382,7 +395,16 @@ def _app_state_path():
 
 def _app_load():
     st = _load_json(_app_state_path(), {})
-    return {"default_category": st.get("default_category", "")}
+    hidden = st.get("hidden", [])
+    behavior = st.get("open_behavior", "remember")
+    return {
+        "default_category": str(st.get("default_category", "")),
+        "open_behavior": behavior if behavior in ("remember", "fixed") else "remember",
+        "led_startup": bool(st.get("led_startup", True)),
+        "hidden": [str(x) for x in hidden] if isinstance(hidden, list) else [],
+        "low_batt_alert": bool(st.get("low_batt_alert", False)),
+        "low_batt_pct": max(5, min(50, int(st.get("low_batt_pct", 15)))),
+    }
 
 
 def _app_save(st):
@@ -446,7 +468,7 @@ def _led_state_path():
 
 # Hardware modes (firmware) + software/reactive modes (our effect loop drives them).
 LED_HW_MODES = ("solid", "breathing", "duality", "rainbow", "spiral")
-LED_REACTIVE_MODES = ("battery", "temp")
+LED_REACTIVE_MODES = ("battery", "temp", "gpu")
 LED_MODES = LED_HW_MODES + LED_REACTIVE_MODES
 LED_SPEEDS = ("low", "medium", "high")
 # Reactive modes ease toward the sensor target: a short tick + a fraction of the
@@ -548,11 +570,21 @@ def _grad(stops, f):
 # full charge. Temperature: blue (cool) -> yellow -> red (hot), no green.
 BATTERY_STOPS = [(0.0, (255, 0, 0)), (0.65, (255, 255, 0)), (1.0, (0, 255, 0))]
 TEMP_STOPS = [(0.0, (0, 0, 255)), (0.5, (255, 255, 0)), (1.0, (255, 0, 0))]
+GPU_STOPS = [(0.0, (0, 255, 0)), (0.5, (255, 255, 0)), (1.0, (255, 0, 0))]
 TEMP_LO, TEMP_HI = 45, 85
 
 
+def _gpu_busy():
+    """iGPU utilisation 0-100 from amdgpu sysfs, or None."""
+    for f in glob.glob("/sys/class/drm/card*/device/gpu_busy_percent"):
+        v = _read_opt(f)
+        if v is not None:
+            return max(0, min(100, v))
+    return None
+
+
 def _reactive_color(mode):
-    """Compute the colour for a sensor-driven mode: battery level or temperature."""
+    """Compute the colour for a sensor-driven mode: battery / temperature / GPU load."""
     if mode == "battery":
         pct = _read_opt(CAPACITY_FILE)
         pct = 0 if pct is None else max(0, min(100, pct))
@@ -561,6 +593,9 @@ def _reactive_color(mode):
         temps = [t for t in (_temp_c(CPU_HW), _temp_c(GPU_HW)) if t is not None]
         t = max(temps) if temps else 0
         return _grad(TEMP_STOPS, (t - TEMP_LO) / (TEMP_HI - TEMP_LO))
+    if mode == "gpu":
+        load = _gpu_busy() or 0
+        return _grad(GPU_STOPS, load / 100)
     return 255, 255, 255
 
 
@@ -715,9 +750,11 @@ class Plugin:
         # Fan: re-assert the custom curve if armed.
         _fan_enforce_once()
         self._fan_task = asyncio.create_task(self._fan_watchdog())
-        # Lighting: re-assert the saved RGB now (a boot / resume may have reset the
-        # rings); the effect loop keeps reactive modes updated and relights on resume.
-        _led_apply(_led_load())
+        # Lighting: re-assert the saved RGB now (unless the user opted out of
+        # applying lighting at startup); the effect loop keeps reactive modes updated
+        # and relights on resume.
+        if _app_load().get("led_startup", True):
+            _led_apply(_led_load())
         self._led_task = asyncio.create_task(self._led_effect_loop())
 
     async def _unload(self):
@@ -754,6 +791,20 @@ class Plugin:
                 last_wall = now
                 st = _led_load()
                 enabled = st.get("enabled")
+
+                # Low-battery alert: while enabled and the setting is on, pulse the
+                # rings red below the threshold (unless charging), overriding the
+                # normal lighting until the battery recovers / is plugged in.
+                app = _app_load()
+                if enabled and app["low_batt_alert"]:
+                    cap = _read_opt(CAPACITY_FILE)
+                    if cap is not None and cap <= app["low_batt_pct"] and _read_str(STATUS_FILE) != "Charging":
+                        phase = 0.5 + 0.5 * math.sin(now * 2.6)  # smooth pulse
+                        bri = round(55 + 200 * phase)
+                        _led_apply({**st, "mode": "solid", "split": False,
+                                    "r": 255, "g": 0, "b": 0, "brightness": bri})
+                        cur = last = None
+                        continue
 
                 # Auto-relight: if lighting should be ON but the hardware reads OFF
                 # (a suspend/resume or a controller re-enumeration reset the rings),
@@ -798,7 +849,7 @@ class Plugin:
     # ---------------------------------------------------------------
     async def app_get_settings(self):
         try:
-            return {"ok": True, **_app_load()}
+            return {"ok": True, "version": VERSION, **_app_load()}
         except Exception as e:  # noqa: BLE001
             decky.logger.exception("app_get_settings failed")
             return {"ok": False, "error": str(e)}
@@ -808,10 +859,36 @@ class Plugin:
             st = _app_load()
             if patch.get("default_category") is not None:
                 st["default_category"] = str(patch["default_category"])
+            if patch.get("open_behavior") in ("remember", "fixed"):
+                st["open_behavior"] = patch["open_behavior"]
+            if patch.get("led_startup") is not None:
+                st["led_startup"] = bool(patch["led_startup"])
+            if isinstance(patch.get("hidden"), list):
+                st["hidden"] = [str(x) for x in patch["hidden"]]
+            if patch.get("low_batt_alert") is not None:
+                st["low_batt_alert"] = bool(patch["low_batt_alert"])
+            if patch.get("low_batt_pct") is not None:
+                st["low_batt_pct"] = max(5, min(50, int(patch["low_batt_pct"])))
             _app_save(st)
             return {"ok": True, **st}
         except Exception as e:  # noqa: BLE001
             decky.logger.exception("app_set_settings failed")
+            return {"ok": False, "error": str(e)}
+
+    async def app_reset_all(self):
+        """Delete all persisted state (battery/fan/led/app) — factory reset."""
+        try:
+            d = _settings_dir()
+            for f in ("battery_state.json", "fan_state.json", "led_state.json",
+                      "app_state.json", "controller_state.json"):
+                try:
+                    os.remove(os.path.join(d, f))
+                except OSError:
+                    pass
+            _led_apply(_led_load())  # apply the now-default (off) lighting
+            return {"ok": True}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.exception("app_reset_all failed")
             return {"ok": False, "error": str(e)}
 
     # ---------------------------------------------------------------
@@ -881,6 +958,20 @@ class Plugin:
             return {"ok": True, "bypass": False, "limit": restore}
         except Exception as e:  # noqa: BLE001
             decky.logger.exception("bat_set_bypass failed")
+            return {"ok": False, "error": str(e)}
+
+    async def bat_toggle_limit(self):
+        """Quick toggle the charge limit between 80% and 100%."""
+        try:
+            new = 80 if _bat_get_limit() >= 100 else 100
+            _bat_write_limit(new)
+            state = _bat_load()
+            if not state.get("bypass"):
+                state["desired_limit"] = new
+                _bat_save(state)
+            return {"ok": True, "limit": new}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.exception("bat_toggle_limit failed")
             return {"ok": False, "error": str(e)}
 
     # ---------------------------------------------------------------
@@ -975,6 +1066,31 @@ class Plugin:
             return {"ok": True, "armed": bool(on)}
         except Exception as e:  # noqa: BLE001
             decky.logger.exception("fan_set_armed failed")
+            return {"ok": False, "error": str(e)}
+
+    async def fan_quick(self, kind: str):
+        """One-tap 'Max' or 'Silent': upsert a dedicated named profile with that
+        curve, select it, and arm — leaving the user's own profiles untouched."""
+        try:
+            if HW is None:
+                return {"ok": False, "error": "hwmon not found"}
+            if kind not in ("max", "silent"):
+                return {"ok": False, "error": f"bad kind {kind}"}
+            state = _fan_load()
+            name = "Max" if kind == "max" else "Silent"
+            curves = {str(f): _quick_curve(kind, f) for f in FANS}
+            prof = next((p for p in state["profiles"] if p["name"] == name), None)
+            if prof is None:
+                prof = _default_profile(name)
+                state["profiles"].append(prof)
+            prof["curves"] = curves
+            state["active"] = prof["id"]
+            state["armed"] = True
+            _fan_save(state)
+            _arm(prof)
+            return {"ok": True, "active": prof["id"], "profiles": _public_profiles(state)}
+        except Exception as e:  # noqa: BLE001
+            decky.logger.exception("fan_quick failed")
             return {"ok": False, "error": str(e)}
 
     async def fan_select_profile(self, pid: str):

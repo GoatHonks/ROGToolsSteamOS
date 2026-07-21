@@ -30,6 +30,7 @@ import {
 const batGetStatus = callable<[], any>("bat_get_status");
 const batSetLimit = callable<[value: number], any>("bat_set_limit");
 const batSetBypass = callable<[on: boolean], any>("bat_set_bypass");
+const batToggleLimit = callable<[], any>("bat_toggle_limit");
 // Fan
 const fanGetStatus = callable<[], any>("fan_get_status");
 const fanSetCurve = callable<[fan: number, points: number[][]], any>("fan_set_curve");
@@ -40,12 +41,14 @@ const fanSelectProfile = callable<[pid: string], any>("fan_select_profile");
 const fanAddProfile = callable<[name: string, copyActive: boolean], any>("fan_add_profile");
 const fanRenameProfile = callable<[pid: string, name: string], any>("fan_rename_profile");
 const fanDeleteProfile = callable<[pid: string], any>("fan_delete_profile");
+const fanQuick = callable<[kind: string], any>("fan_quick");
 // Lighting
 const ledGetStatus = callable<[], any>("led_get_status");
 const ledSet = callable<[patch: any], any>("led_set");
 // App settings
 const appGetSettings = callable<[], any>("app_get_settings");
 const appSetSettings = callable<[patch: any], any>("app_set_settings");
+const appResetAll = callable<[], any>("app_reset_all");
 
 const toast = (title: string, body: string) => toaster.toast({ title, body });
 const failToast = (title: string, r: any) => {
@@ -328,6 +331,22 @@ function BatteryBody({ active }: { active: boolean }) {
         </ButtonItem>
       </PanelSectionRow>
       <PanelSectionRow>
+        <ButtonItem
+          layout="below"
+          disabled={s.bypass}
+          onClick={async () => {
+            const r = await batToggleLimit();
+            if (failToast("ROG Battery", r)) {
+              setPendingLimit(r.limit);
+              setS((prev: any) => ({ ...prev, limit: r.limit }));
+              toast("ROG Battery", `Charge limit ${r.limit}%`);
+            }
+          }}
+        >
+          Quick toggle {s.limit >= 100 ? "→ 80%" : "→ 100%"}
+        </ButtonItem>
+      </PanelSectionRow>
+      <PanelSectionRow>
         <ToggleField
           label="Bypass charging"
           description="Pin limit to current % so it runs off AC (held even after sleep)"
@@ -493,6 +512,24 @@ function FanBody({ active }: { active: boolean }) {
           onChange={onArmChange}
         />
       </PanelSectionRow>
+      <PanelSectionRow>
+        <div style={btnRow}>
+          {(["max", "silent"] as const).map((k) => (
+            <DialogButton
+              key={k}
+              style={btn}
+              onClick={async () => {
+                if (failToast("ROG Fan", await fanQuick(k))) {
+                  setDirty(false);
+                  refresh();
+                }
+              }}
+            >
+              {k === "max" ? "Max fan" : "Silent"}
+            </DialogButton>
+          ))}
+        </div>
+      </PanelSectionRow>
 
       <SubHeader>Preset</SubHeader>
       <PanelSectionRow>
@@ -590,6 +627,7 @@ const LED_MODE_LABELS: Record<string, string> = {
   spiral: "Spiral",
   battery: "Battery level",
   temp: "Temperature",
+  gpu: "GPU load",
 };
 const LED_SPEED_LABELS: Record<string, string> = { low: "Slow", medium: "Medium", high: "Fast" };
 // Which modes expose which controls.
@@ -598,7 +636,8 @@ const LED_SPEED_MODES = ["breathing", "duality", "rainbow", "spiral"]; // show s
 const LED_DUAL_MODES = ["duality"]; // show the secondary color
 const LED_REACTIVE_HINTS: Record<string, string> = {
   battery: "Rings track battery level: red (low) → yellow → green (full).",
-  temp: "Rings track CPU/GPU temperature: blue (cool) → green → red (hot).",
+  temp: "Rings track CPU/GPU temperature: blue (cool) → yellow → red (hot).",
+  gpu: "Rings track GPU load: green (idle) → yellow → red (maxed).",
 };
 const LED_GAMMA_DEFAULTS = { gamma_r: 1.0, gamma_g: 2.0, gamma_b: 1.2 };
 
@@ -885,34 +924,122 @@ const DEFAULT_CATEGORY_OPTIONS = [
 ];
 
 function SettingsBody({ active }: { active: boolean }) {
-  const [dc, setDc] = useState<string | null>(null);
+  const [s, setS] = useState<any>(null);
+  const [confirmReset, setConfirmReset] = useState(false);
 
   useEffect(() => {
-    if (active) appGetSettings().then((r) => setDc(r?.ok ? r.default_category ?? "" : ""));
+    if (active) appGetSettings().then((r) => setS(r?.ok ? r : {}));
   }, [active]);
 
-  if (dc === null) return null;
+  if (!s) return null;
+  const patch = async (p: any) => {
+    setS((prev: any) => ({ ...prev, ...p }));
+    const r = await appSetSettings(p);
+    if (r?.ok) setS((prev: any) => ({ ...prev, ...r }));
+  };
+  const hidden: string[] = s.hidden ?? [];
+  const fixed = s.open_behavior === "fixed";
+  const selectable = DEFAULT_CATEGORY_OPTIONS.filter((o) => o.key);
+
   return (
     <>
+      <SubHeader first>Panel</SubHeader>
       <PanelSectionRow>
         <div style={{ width: "100%" }}>
-          <div style={{ fontSize: "0.8em", opacity: 0.7, marginBottom: "4px" }}>
-            Category open by default
-          </div>
+          <div style={{ fontSize: "0.8em", opacity: 0.7, marginBottom: "4px" }}>On open</div>
           <Dropdown
-            rgOptions={DEFAULT_CATEGORY_OPTIONS.map((o) => ({ label: o.title, data: o.key }))}
-            selectedOption={dc}
-            onChange={(o) => {
-              setDc(o.data);
-              appSetSettings({ default_category: o.data });
-            }}
+            rgOptions={[
+              { label: "Remember last opened", data: "remember" },
+              { label: "Always open a category", data: "fixed" },
+            ]}
+            selectedOption={fixed ? "fixed" : "remember"}
+            onChange={(o) => patch({ open_behavior: o.data })}
           />
         </div>
       </PanelSectionRow>
+      {fixed && (
+        <PanelSectionRow>
+          <div style={{ width: "100%" }}>
+            <div style={{ fontSize: "0.8em", opacity: 0.7, marginBottom: "4px" }}>
+              Category to open
+            </div>
+            <Dropdown
+              rgOptions={DEFAULT_CATEGORY_OPTIONS.map((o) => ({ label: o.title, data: o.key }))}
+              selectedOption={s.default_category ?? ""}
+              onChange={(o) => patch({ default_category: o.data })}
+            />
+          </div>
+        </PanelSectionRow>
+      )}
       <PanelSectionRow>
-        <div style={{ fontSize: "0.75em", opacity: 0.6 }}>
-          Which category is expanded when you first open ROGTools.
+        <div style={{ fontSize: "0.8em", opacity: 0.7 }}>
+          Show categories (hide the ones you don't use; Settings always stays):
         </div>
+      </PanelSectionRow>
+      {selectable.map((o) => (
+        <PanelSectionRow key={o.key}>
+          <ToggleField
+            label={o.title}
+            checked={!hidden.includes(o.key)}
+            onChange={(show) =>
+              patch({
+                hidden: show ? hidden.filter((k) => k !== o.key) : [...hidden, o.key],
+              })
+            }
+          />
+        </PanelSectionRow>
+      ))}
+
+      <SubHeader>Lighting</SubHeader>
+      <PanelSectionRow>
+        <ToggleField
+          label="Apply lighting at startup"
+          description="Restore your RGB when the plugin loads (off = rings stay dark until you turn them on)."
+          checked={!!s.led_startup}
+          onChange={(on) => patch({ led_startup: on })}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ToggleField
+          label="Low-battery alert"
+          description="Pulse the rings red below the threshold while on battery."
+          checked={!!s.low_batt_alert}
+          onChange={(on) => patch({ low_batt_alert: on })}
+        />
+      </PanelSectionRow>
+      {s.low_batt_alert && (
+        <PanelSectionRow>
+          <SliderField
+            label="Alert below %"
+            value={s.low_batt_pct ?? 15}
+            min={5}
+            max={50}
+            step={5}
+            showValue
+            onChange={(v) => patch({ low_batt_pct: v })}
+          />
+        </PanelSectionRow>
+      )}
+
+      <SubHeader>About</SubHeader>
+      <Stat label="Version" value={s.version ?? "—"} />
+      <PanelSectionRow>
+        <ButtonItem
+          layout="below"
+          onClick={async () => {
+            if (!confirmReset) {
+              setConfirmReset(true);
+              return;
+            }
+            setConfirmReset(false);
+            if (failToast("ROGTools", await appResetAll())) {
+              toast("ROGTools", "All settings reset");
+              appGetSettings().then((r) => setS(r?.ok ? r : {}));
+            }
+          }}
+        >
+          {confirmReset ? "Tap again to confirm reset" : "Reset all settings"}
+        </ButtonItem>
       </PanelSectionRow>
     </>
   );
@@ -935,22 +1062,20 @@ const CATEGORIES: {
 ];
 
 // Remembered open/closed state, kept at module scope so it survives the panel
-// unmounting when the user closes and reopens Quick Access. Seeded once per
-// session from the user's "open by default" setting.
+// unmounting when the user closes and reopens Quick Access.
 let persistedOpen: Record<string, boolean> = {};
-let seededDefault = false;
 
 function Content() {
   const [open, setOpen] = useState<Record<string, boolean>>(persistedOpen);
+  const [hidden, setHidden] = useState<string[] | null>(null);
 
-  // On first open of the session, expand the user's chosen default category.
+  // Apply the user's open-behavior + visibility settings when the panel opens.
   useEffect(() => {
-    if (seededDefault) return;
-    seededDefault = true;
     appGetSettings().then((r) => {
-      const dc = r?.ok ? r.default_category : "";
-      if (dc) {
-        persistedOpen = { [dc]: true };
+      setHidden(r?.ok ? r.hidden ?? [] : []);
+      // "Fixed" reopens the chosen category every time; "remember" keeps the last state.
+      if (r?.ok && r.open_behavior === "fixed" && r.default_category) {
+        persistedOpen = { [r.default_category]: true };
         setOpen(persistedOpen);
       }
     });
@@ -962,9 +1087,12 @@ function Content() {
       return next;
     });
 
+  if (hidden === null) return null; // wait for settings so categories don't flash
+  const visible = CATEGORIES.filter((c) => c.key === "settings" || !hidden.includes(c.key));
+
   return (
     <>
-      {CATEGORIES.map((c) => {
+      {visible.map((c) => {
         const isOpen = !!open[c.key];
         const Body = c.body;
         return (

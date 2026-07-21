@@ -9,7 +9,8 @@ lighting control.
 ## Features
 
 ### 🔋 Battery
-- Charge-limit slider + quick presets (80 / 85 / 90 / 100%).
+- Charge-limit slider + quick presets (80 / 85 / 90 / 100%) and a one-tap
+  **80 ↔ 100% toggle**.
 - **Bypass charging** — pin the limit to the current % so the Ally runs off AC
   without charging (held across sleep/resume).
 - Health/power dashboard: source, ± wattage, time-to-full/empty, health %,
@@ -19,6 +20,7 @@ lighting control.
 ### 🌀 Fan Control
 - A custom fan-curve editor — the "Custom" profile the Ally lacks: per-fan
   8-point curves (CPU + GPU), named presets, live temps/RPM.
+- One-tap **Max** and **Silent** presets.
 - A watchdog re-arms the curve after a performance-profile switch or resume.
 
 ### 💡 Lighting
@@ -28,15 +30,20 @@ a suspend/resume.
 - **Modes:** Solid, Breathing, **Duality** (breathe between two colors),
   Rainbow, Spiral.
 - **Per-side colors** (Solid): independent left/right ring colors.
-- **Reactive modes** (ROGTools-only): **Battery level** (red → yellow → green)
-  and **Temperature** (blue → yellow → red), updated live from the sensors with
-  smooth fading.
+- **Reactive modes** (ROGTools-only): **Battery level** (red → yellow → green),
+  **Temperature** (blue → yellow → red), and **GPU load** (green → yellow → red),
+  updated live from the sensors with smooth fading.
+- **Low-battery alert**: pulse the rings red below a chosen % while on battery.
 - HSV color picker (hue spectrum + saturation) with a hex field and presets;
   brightness and effect-speed controls.
 - Live **color calibration** (per-channel gamma) so mixed colors match the swatch.
 
 ### ⚙️ Settings
-- Choose which category is **open by default** when you open ROGTools.
+- **On open**: remember the last-opened category, or always open a fixed one.
+- **Show/hide categories** you don't use.
+- **Apply lighting at startup** toggle.
+- **Low-battery alert** threshold.
+- **About** (version) + **Reset all settings**.
 
 More categories can be added without restructuring — see `CLAUDE.md`.
 
