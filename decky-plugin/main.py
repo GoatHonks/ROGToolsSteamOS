@@ -492,8 +492,8 @@ async def _reconnect_device(dev_path):
 LED_DEFAULT_ZONES = 4
 
 
-def _led_node():
-    """The /sys/class/leds dir for the RGB rings (has multi_intensity)."""
+def _led_discover():
+    """Scan /sys/class/leds for the RGB rings node (has multi_intensity)."""
     fallback = None
     for d in sorted(glob.glob("/sys/class/leds/*/")):
         d = d.rstrip("/")
@@ -505,13 +505,24 @@ def _led_node():
     return fallback
 
 
-LED_NODE = _led_node()
+_LED_NODE = None
+
+
+def _led_node():
+    """The RGB rings sysfs dir, re-discovered if we don't have a valid one yet.
+    NOT cached permanently — the device can appear late at boot / after a resume,
+    so we must re-scan rather than latch 'none' forever."""
+    global _LED_NODE
+    if not _LED_NODE or not os.path.isdir(_LED_NODE):
+        _LED_NODE = _led_discover()
+    return _LED_NODE
 
 
 def _led_zone_count():
-    if not LED_NODE:
+    node = _led_node()
+    if not node:
         return LED_DEFAULT_ZONES
-    n = len(_read_str(os.path.join(LED_NODE, "multi_index")).split())
+    n = len(_read_str(os.path.join(node, "multi_index")).split())
     return n if n > 0 else LED_DEFAULT_ZONES
 
 
@@ -643,18 +654,31 @@ def _reactive_color(mode):
     return 255, 255, 255
 
 
+_LED_HIDRAW = None
+
+
 def _led_hidraw():
-    """The /dev/hidrawN tied to the same HID device as the RGB LED node."""
-    node = LED_NODE or _led_node()
+    """The /dev/hidrawN tied to the same HID device as the RGB LED node. Cached —
+    only re-discovered when missing (avoid frequent/recursive sysfs traversal on a
+    possibly-wedged device). Call _led_hidraw_reset() to force a re-scan."""
+    global _LED_HIDRAW
+    if _LED_HIDRAW and os.path.exists(_LED_HIDRAW):
+        return _LED_HIDRAW
+    node = _led_node()
     if not node:
+        _LED_HIDRAW = None
         return None
     hid_dev = os.path.realpath(os.path.join(node, "device"))
+    _LED_HIDRAW = None
     for h in glob.glob(os.path.join(hid_dev, "hidraw", "hidraw*")):
-        return "/dev/" + os.path.basename(h)
-    for base in (hid_dev, os.path.dirname(hid_dev)):
-        for h in glob.glob(os.path.join(base, "**", "hidraw", "hidraw*"), recursive=True):
-            return "/dev/" + os.path.basename(h)
-    return None
+        _LED_HIDRAW = "/dev/" + os.path.basename(h)
+        break
+    return _LED_HIDRAW
+
+
+def _led_hidraw_reset():
+    global _LED_HIDRAW
+    _LED_HIDRAW = None
 
 
 def _hid_buf(data):
@@ -676,6 +700,7 @@ def _led_apply_hid(st):
         fd = os.open(node, os.O_WRONLY)
     except OSError:
         decky.logger.exception("open hidraw failed")
+        _led_hidraw_reset()  # stale/renumbered — re-scan next time
         return False
     try:
         def send(data):
@@ -716,6 +741,7 @@ def _led_apply_hid(st):
         return True
     except OSError:
         decky.logger.exception("led hid apply failed")
+        _led_hidraw_reset()  # device may have renumbered/gone — re-scan next time
         return False
     finally:
         os.close(fd)
@@ -723,17 +749,18 @@ def _led_apply_hid(st):
 
 def _led_apply_sysfs(st):
     """Fallback: solid colour + brightness via sysfs (no effects; colour balance off)."""
-    if not LED_NODE:
+    node = _led_node()
+    if not node:
         return False
     try:
         if st.get("enabled"):
             cr, cg, cb = _color_correct(st["r"], st["g"], st["b"], st)
             packed = (cr << 16) | (cg << 8) | cb
             zones = _led_zone_count()
-            _write(os.path.join(LED_NODE, "multi_intensity"), " ".join([str(packed)] * zones))
-            _write(os.path.join(LED_NODE, "brightness"), _clamp8(st.get("brightness", 128)))
+            _write(os.path.join(node, "multi_intensity"), " ".join([str(packed)] * zones))
+            _write(os.path.join(node, "brightness"), _clamp8(st.get("brightness", 128)))
         else:
-            _write(os.path.join(LED_NODE, "brightness"), 0)
+            _write(os.path.join(node, "brightness"), 0)
         return True
     except OSError:
         decky.logger.exception("led apply failed")
@@ -759,9 +786,10 @@ def _led_has_effects():
 def _led_hw_off():
     """True if the rings are physically off (brightness 0) — used to detect a reset
     (suspend/resume, controller re-enumeration) so we can relight automatically."""
-    if not LED_NODE:
+    node = _led_node()
+    if not node:
         return False
-    v = _read_opt(os.path.join(LED_NODE, "brightness"))
+    v = _read_opt(os.path.join(node, "brightness"))
     return v is None or v == 0
 
 
@@ -1193,7 +1221,7 @@ class Plugin:
         try:
             return {
                 "ok": True,
-                "available": bool(LED_NODE),
+                "available": bool(_led_node()),
                 "effects": _led_has_effects(),
                 "modes": list(LED_MODES),
                 "speeds": list(LED_SPEEDS),
@@ -1223,7 +1251,7 @@ class Plugin:
                 if patch.get(k) is not None:
                     st[k] = _clampf(patch[k], LED_GAMMA_MIN, LED_GAMMA_MAX)
             _led_save(st)
-            if not _led_apply(st) and not LED_NODE:
+            if not _led_apply(st) and not _led_node():
                 return {"ok": False, "error": "No RGB LED node on this device"}
             return {"ok": True, **st}
         except Exception as e:  # noqa: BLE001
