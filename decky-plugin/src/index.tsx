@@ -618,7 +618,7 @@ function FanBody({ active }: { active: boolean }) {
 // Lighting category
 // ============================================================
 // RGB joystick-ring lighting. Driven via the ASUS HID protocol (accurate color +
-// hardware effects), re-applied by the backend after a controller reconnect.
+// hardware effects), re-applied by the backend after suspend/resume.
 const LED_MODE_LABELS: Record<string, string> = {
   solid: "Solid",
   breathing: "Breathing",
@@ -788,7 +788,7 @@ function LightingControls({ active }: { active: boolean }) {
       <PanelSectionRow>
         <ToggleField
           label="RGB lighting"
-          description="Joystick-ring lighting — kept applied even after a controller reconnect"
+          description="Joystick-ring lighting — kept applied across suspend/resume"
           checked={!!s.enabled}
           onChange={(on) => patch({ enabled: on })}
         />

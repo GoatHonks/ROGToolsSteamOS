@@ -419,8 +419,8 @@ def _app_save(st):
 # (4 zones); `multi_intensity` takes ONE packed 0xRRGGBB integer PER ZONE — verified
 # on-device: writing "255 0 0 0" (255 == 0x0000FF) lit the LEFT ring blue. A
 # separate `brightness` node (0-255) scales it. We drive this sysfs node directly
-# (no HID grabbing), so the color survives and is re-applied after a controller
-# reconnect — the whole point of owning it instead of relying on an external plugin.
+# (no HID grabbing), so the color survives and is re-applied after suspend/resume —
+# the whole point of owning it instead of relying on an external plugin.
 LED_DEFAULT_ZONES = 4
 
 
@@ -477,7 +477,6 @@ LED_SPEEDS = ("low", "medium", "high")
 LED_FADE_TICK = 0.8
 LED_FADE_ALPHA = 0.3
 LED_ASSERT_EVERY = 6   # check for an unexpected LED reset every ~5s (6 * tick)
-LED_MAX_ASSERTS = 4    # stop re-cycling after this many relights that don't stick
 
 
 def _led_load():
@@ -515,8 +514,8 @@ def _led_save(st):
 # 64-byte HID output reports (report id 0x5A) to the ally:rgb device's own hidraw
 # node. This is the ASUS-native protocol (what Armoury Crate uses), so colours are
 # correct — unlike the sysfs multi_intensity path, whose channel balance is off
-# (green too strong). We rediscover the hidraw on every apply because a controller
-# reconnect re-enumerates the device and renumbers /dev/hidrawN.
+# (green too strong). We re-discover the hidraw only when needed because a resume /
+# re-enumeration can renumber /dev/hidrawN.
 RGB_INIT = [0x5A, 0x41, 0x53, 0x55, 0x53, 0x20, 0x54, 0x65, 0x63, 0x68, 0x2E, 0x49, 0x6E, 0x63, 0x2E]
 RGB_SET = [0x5A, 0xB5]
 RGB_APPLY = [0x5A, 0xB4]
@@ -730,7 +729,7 @@ def _led_has_effects():
 
 def _led_hw_off():
     """True if the rings are physically off (brightness 0) — used to detect a reset
-    (suspend/resume, controller re-enumeration) so we can relight automatically."""
+    (suspend/resume) so we can relight automatically."""
     node = _led_node()
     if not node:
         return False
@@ -781,7 +780,7 @@ class Plugin:
         last = None      # last colour actually written (ints), to skip no-op writes
         last_wall = time.time()
         tick = 0
-        assert_fails = 0  # consecutive relights that didn't stick (backoff guard)
+        alerting = False  # were we showing the low-battery alert last tick?
         while True:
             await asyncio.sleep(LED_FADE_TICK)
             tick += 1
@@ -796,33 +795,44 @@ class Plugin:
                 # rings red below the threshold (unless charging), overriding the
                 # normal lighting until the battery recovers / is plugged in.
                 app = _app_load()
+                alert_now = False
                 if enabled and app["low_batt_alert"]:
                     cap = _read_opt(CAPACITY_FILE)
-                    if cap is not None and cap <= app["low_batt_pct"] and _read_str(STATUS_FILE) != "Charging":
-                        phase = 0.5 + 0.5 * math.sin(now * 2.6)  # smooth pulse
-                        bri = round(55 + 200 * phase)
-                        _led_apply({**st, "mode": "solid", "split": False,
-                                    "r": 255, "g": 0, "b": 0, "brightness": bri})
-                        cur = last = None
-                        continue
+                    alert_now = (
+                        cap is not None
+                        and cap <= app["low_batt_pct"]
+                        and _read_str(STATUS_FILE) != "Charging"
+                    )
+                if alert_now:
+                    # Pulse the RED CHANNEL (dark red <-> bright red) at full
+                    # brightness — clearly visible, unlike the coarse 4-level HID
+                    # brightness which barely changed.
+                    phase = 0.5 + 0.5 * math.sin(now * 3.0)
+                    red = round(35 + 220 * phase)
+                    _led_apply({**st, "mode": "solid", "split": False,
+                                "r": red, "g": 0, "b": 0, "brightness": 255})
+                    cur = last = None
+                    alerting = True
+                    continue
+                if alerting:
+                    # Alert just cleared — restore the user's normal lighting.
+                    alerting = False
+                    _led_apply(st)
+                    cur = last = None
 
                 # Auto-relight: if lighting should be ON but the hardware reads OFF
-                # (a suspend/resume or a controller re-enumeration reset the rings),
-                # re-cycle off->on to restore it — the same fix as toggling RGB by
-                # hand. Checked right after a resume (big gap) and periodically. A
-                # single apply doesn't relight after a reset, so we cycle; and we
-                # back off if it won't stick, to avoid an endless loop.
+                # (a suspend/resume reset the rings), re-cycle off->on to restore it
+                # — the same fix as toggling RGB by hand. Checked right after a resume
+                # (big gap) and periodically. A single apply doesn't relight after a
+                # reset, so we cycle; and we keep trying every check until it sticks
+                # (no permanent giveup — the device can be slow to come back).
                 if enabled and (gap > 5 or tick % LED_ASSERT_EVERY == 0):
                     if _led_hw_off():
-                        if assert_fails < LED_MAX_ASSERTS:
-                            decky.logger.info("LEDs off but should be on; re-cycling")
-                            _led_apply({**st, "enabled": False})
-                            await asyncio.sleep(0.3)
-                            _led_apply(st)
-                            cur = last = None
-                            assert_fails += 1
-                    else:
-                        assert_fails = 0
+                        decky.logger.info("RGB reads off but should be on; re-cycling off->on")
+                        _led_apply({**st, "enabled": False})
+                        await asyncio.sleep(0.3)
+                        _led_apply(st)
+                        cur = last = None
 
                 # Reactive modes: ease the ring colour toward the sensor target.
                 if enabled and st.get("mode") in LED_REACTIVE_MODES:
